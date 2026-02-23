@@ -1,0 +1,8 @@
+---
+title: "Some rambling"
+listing:
+  contents: ramb
+  type: default
+  sort: "date desc"
+  categories: true
+---

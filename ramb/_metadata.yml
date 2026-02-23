@@ -1,0 +1,42 @@
+# Freeze computed outputs
+freeze: true
+
+# Enable banner style title blocks
+title-block-banner: true
+
+# Enable CC licence appendix
+license: "CC BY"
+
+# Default for table of contents
+toc: false
+toc-title: Table of contents
+toc-location: left
+
+# Default knitr options
+execute:
+  echo: true
+  message: false
+  warning: false
+  cache: true
+  freeze: true
+
+# Default author
+author:
+  - name: Einar Hjörleifsson
+    url: https://heima.hafro.is/~einarhj/
+    affiliation: Marine & Freshwater Research Institute
+    affiliation-url: https://hafogvatn.is
+
+# Default fields for citation
+citation: false
+
+format:
+  html:
+    theme: flatly
+    css: styles.css
+    toc: false
+    message: false
+    warning: false
+    echo: true
+    code-fold: false
+

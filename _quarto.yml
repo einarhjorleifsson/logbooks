@@ -1,0 +1,31 @@
+project:
+  type: website
+
+website:
+  title: "Logbooks"
+  site-url: https://heima.hafro.is/~einarhj/logbooks
+  # favicon: "image/hafro_logo.png"
+  navbar:
+    right:
+      - text: Structure
+        menu:
+          - structure.qmd
+      - text: Logbooks
+        menu:
+          - index.qmd
+      - ramb-list.qmd # add ramb blog to the navbar
+      - icon: github
+        href: https://github.com/einarhjorleifsson/logbooks
+
+format:
+  html:
+    theme: flatly
+    css: styles.css
+    toc: false
+    message: false
+    warning: false
+    echo: true
+    code-fold: true
+
+execute:
+  freeze: auto  # re-render only when source changes
