@@ -8,3 +8,5 @@
 *.parquet
 _site
 .positai
+
+**/*.quarto_ipynb

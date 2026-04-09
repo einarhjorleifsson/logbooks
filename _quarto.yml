@@ -10,6 +10,7 @@ website:
       - text: Structure
         menu:
           - structure.qmd
+          - wacky_recovery.qmd
       - text: Logbooks
         menu:
           - index.qmd

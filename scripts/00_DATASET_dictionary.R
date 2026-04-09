@@ -1,5 +1,5 @@
 dictionary <-
-  tibble::tribble(~new, ~old,
+  tibble::tribble(~new, ~name,
                   ".sid", "visir",
                   "vid", "skipnr",
                   "gid", "veidarf",
@@ -39,8 +39,8 @@ dictionary <-
                   "mean_gillnet_length", "medal_lengd_neta",
                   "bait", "beita",
                   "temps1", "uppsjavarhiti",  # surface temperature
-                  "t1", "logn_hefst",         # time setting starts
-                  "t12", "drattur_hefst",      # time gear hauling starts
+                  "t0", "logn_hefst",         # time setting starts
+                  "t1", "drattur_hefst",      # time gear hauling starts
                   "t2", "drattur_lykur",      # time gear hauling ends
                   "n_units", "gildrur",
                   "hours", "klst",

@@ -1,0 +1,136 @@
+---
+title: "Untitled"
+author: "Einar Hjörleifsson"
+output: 
+  html_document: 
+    fig_caption: yes
+    fig_height: 6.6
+    fig_width: 9.5
+    code_folding: false
+message: false
+warning: false
+editor: source
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message = FALSE}
+library(tidyverse)
+library(duckdbfs)
+geo_convert <- function (x, inverse = FALSE, na = FALSE) 
+{
+    if (!inverse) {
+        i <- sign(x)
+        x <- abs(x)
+        min <- (x/100) - trunc(x/10000) * 100
+        if (na) 
+            min <- ifelse(min > 60, NA, min)
+        return((i * (x + (200/3) * min))/10000)
+    }
+    else {
+        i <- sign(x)
+        x <- abs(x)
+        p1 <- floor(x)
+        p2 <- floor((x - p1) * 60)
+        p3 <- round((x - p1 - p2/60) * 100 * 60)
+        return(i * (p1 * 10000 + p2 * 100 + p3))
+    }
+}
+```
+
+```{r}
+stofn <- open_dataset("data-raw/data-dump/afli/rafr_stofn.parquet") |>  select(visir, skipnr)
+siriti <- 
+  open_dataset("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet") |> 
+  mutate(year = year(timi)) |> 
+  select(year, visir, timi, lengd, breidd) |>  
+  filter(breidd > 65.9,
+         breidd < 66.10,
+         lengd  > -27,
+         lengd < -26.4) |> 
+  left_join(stofn) |> 
+  collect(n = Inf)
+```
+
+```{r}
+siriti <- 
+  siriti |> 
+  filter(year == 2017) |> 
+  slice(1:1e4)
+siriti |> 
+  ggplot(aes(lengd, breidd, group = visir)) +
+  theme_bw() +
+  geom_point(colour = "red", size = 0.25) +
+  geom_path(lwd = 0.2, alpha = 0.5) +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL, title = "Wacky tow paths")
+```
+
+The patterns most likely have to do with incorrect conversion of the integer value of the format DDMMmm to the degree decimal fomat (DD.dd). In the integer format the last two digits are decimal minutes, which can take values from 00 to 99. If the last two value are treated as seconds and if for values greater than 59 the minute is rounded up and the remainder then obtained by a subtraction from 60 one can obtain the following pattern:
+
+```{r, fig.cap = "Simulated true path (green) and corresponding wacky path (blue) and a single reported track (red). The grey area correspond to areas were 'seconds' are below 60."}
+
+# The function for that could be written as:
+geo_convert_wacky <- function(x) {
+  
+  x <- abs(x)
+  
+  dd <- trunc(x/1e4)
+  mm <- trunc((x - dd * 1e4)/1e2)
+  ss <- x - trunc(x/1e2)*1e2
+  mm <- ifelse(ss >= 60, mm + 1, mm)
+  ss <- ifelse(ss >= 60, ss - 60, ss)
+  
+  x = dd + mm/60 + ss/60/60
+  
+  return(x)
+}
+
+# Generate some grid patterns that will mimic that:
+x <- expand.grid(lon = seq(-27,-26.4, by = 0.0001),
+                 lat = seq(65.9, 66.1, by = 0.0001)) |> 
+  as_tibble() |> 
+  mutate(x = -geo_convert(lon, inverse = TRUE),
+         y =  geo_convert(lat, inverse = TRUE)) |> 
+  select(x, y) |> 
+  distinct() |> 
+  mutate(xss = x - trunc(x/1e2)*1e2,
+         yss = y - trunc(y/1e2)*1e2,
+         cat = ifelse(xss < 60 & yss < 60,"below","above"),
+         lon = -geo_convert(x),
+         lat =  geo_convert(y))
+p <- 
+  x |> 
+  filter(cat %in% "below") |> 
+  sample_n(2.5e5) |> 
+  ggplot(aes(lon,lat)) + 
+  theme_bw() +
+  geom_point(size = 0.5, colour = "grey") +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL)
+
+# Generate a tow path and then calculate a wacky-path:
+
+d <- tibble(x=seq(-27,-26.4, length.out = 50),
+                y=seq(65.90, 66.10, length.out = 50)) |> 
+  mutate(x = geo_convert(x, inverse = TRUE),
+         y = geo_convert(y, inverse = TRUE),
+         lon = geo_convert(x),
+         lat = geo_convert(y),
+         lonw = -geo_convert_wacky(x),
+         latw = geo_convert_wacky(y))
+
+i <- siriti$visir == -833887
+p +
+  geom_segment(data = d, aes(lon, lat, xend = lonw, yend = latw), colour = "yellow") +
+  geom_path(data = d, aes(lon, lat), colour = "darkgreen") +
+  geom_point(data = d, aes(lon, lat), colour = "darkgreen", size = 1) +
+  geom_path(data = d, aes(lonw, latw), colour = "blue") +
+  geom_point(data = d, aes(lonw, latw), colour = "blue", size = 1) +
+  geom_path(data = siriti[i,], aes(lengd, breidd), colour = "red", alpha = 0.5) +
+  geom_point(data = siriti[i,], aes(lengd, breidd), colour = "red", size = 1, alpha = 0.5)
+```
+

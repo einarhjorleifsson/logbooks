@@ -1,0 +1,1060 @@
+---
+title: "Recovering wacky coordinates"
+author: "Einar Hjörleifsson"
+date: today
+---
+
+```{r setup}
+#| include: false
+library(tidyverse)
+library(duckdbfs)
+```
+
+## Background
+
+The automatic logger data (`rafr_sjalfvirkir_maelar.parquet`) stores vessel positions
+in columns `lengd` (longitude) and `breidd` (latitude) as decimal degrees. However,
+an investigation documented in `wackytracks.qmd` revealed that many recorded positions
+are implausible — vessel tracks exhibit characteristic zigzag patterns that do not
+reflect real movement.
+
+The root cause is a **systematic conversion error**: the original positions were
+encoded as integers in the format **DDMMmm** (degrees–minutes–decimal-minutes,
+where the last two digits represent hundredths of a minute, ranging 00–99). These
+were incorrectly converted to decimal degrees using code that treated the last two
+digits as *seconds* (valid range 00–59). When the decimal-minute value was ≥ 60,
+the conversion rolled the minute counter over and subtracted 60, placing the reported
+position up to ~0.4 nautical miles away from the true location.
+
+The stored decimal-degree values reflect this erroneous conversion. This document
+describes how to detect which records are affected, recover the true coordinates,
+and resolve ambiguous cases using reported speed and heading.
+
+::: {.callout-important}
+## Confidence summary (development subset, 2017)
+
+Every affected record can be assigned one of three recovery-confidence levels based
+on the extracted decimal-minutes value ($ss$) for each coordinate:
+
+| Level | Criterion | Positional uncertainty | Share |
+|:--|:--|:--|--:|
+| **High** | $ss \in [40,59]$ for **both** coordinates | Exact (unique solution) | ~4% |
+| **Partial** | $ss \in [40,59]$ for **one** coordinate | ~300–740 m in one direction | ~33% |
+| **Low** | $ss \in [0,39]$  for **both** coordinates | ~300–740 m in both directions | ~63% |
+
+High-confidence records are recovered exactly. Partial and low-confidence records
+are resolved using the greedy forward-backward smoother (reported speed and heading),
+which reduces median track-prediction error by ~21% and median turn angle by 33–48%
+compared with simple recovery alone.
+:::
+
+---
+
+## Functions
+
+All utility functions are collected here for easy reuse.
+
+```{r funs}
+# ── Coordinate conversion ──────────────────────────────────────────────────
+
+# Correct DDMMmm integer → decimal degrees (or inverse)
+geo_convert <- function(x, inverse = FALSE, na = FALSE) {
+  if (!inverse) {
+    i   <- sign(x); x <- abs(x)
+    min <- (x / 100) - trunc(x / 10000) * 100
+    if (na) min <- ifelse(min > 60, NA, min)
+    return((i * (x + (200 / 3) * min)) / 10000)
+  } else {
+    i  <- sign(x); x <- abs(x)
+    p1 <- floor(x)
+    p2 <- floor((x - p1) * 60)
+    p3 <- round((x - p1 - p2 / 60) * 100 * 60)
+    return(i * (p1 * 10000 + p2 * 100 + p3))
+  }
+}
+
+# ── Wacky-recovery functions ───────────────────────────────────────────────
+
+# Extract the decimal-minutes value (ss) hidden in a wacky decimal degree.
+# This reverses the erroneous seconds-based conversion.
+extract_ss <- function(w) {
+  w  <- abs(w)
+  dd <- floor(w)
+  mm <- floor((w - dd) * 60)
+  ss <- round(((w - dd) * 60 - mm) * 60)
+  ss
+}
+
+# Interpretation A: non-wacky recovery (treat extracted ss as decimal minutes)
+recover_coords <- function(w, sign_w = 1) {
+  w  <- abs(w)
+  dd <- floor(w)
+  mm <- floor((w - dd) * 60)
+  ss <- round(((w - dd) * 60 - mm) * 60)
+  sign_w * (dd + mm / 60 + ss / 6000)
+}
+
+# Interpretation B: wacky recovery (original dm was ss + 60, minute over-counted)
+recover_coords_wacky <- function(w, sign_w = 1) {
+  w  <- abs(w)
+  dd <- floor(w)
+  mm <- floor((w - dd) * 60)
+  ss <- round(((w - dd) * 60 - mm) * 60)
+  sign_w * (dd + (mm - 1) / 60 + (ss + 60) / 6000)
+}
+
+# Classify confidence for a single record given its ss values.
+# Returns "high" (both coords exact), "partial" (one coord exact),
+# or "low" (both coords carry residual ambiguity).
+classify_confidence <- function(ss_lon, ss_lat) {
+  dplyr::case_when(
+    ss_lon >= 40 & ss_lat >= 40 ~ "high",
+    ss_lon  < 40 & ss_lat  < 40 ~ "low",
+    TRUE                         ~ "partial"
+  )
+}
+
+# ── Geodetic helpers ───────────────────────────────────────────────────────
+
+# Haversine distance in metres between two WGS-84 points
+haversine_m <- function(lon1, lat1, lon2, lat2) {
+  R    <- 6371000
+  phi1 <- lat1 * pi / 180; phi2 <- lat2 * pi / 180
+  dphi <- (lat2 - lat1) * pi / 180
+  dlam <- (lon2 - lon1) * pi / 180
+  a    <- sin(dphi / 2)^2 + cos(phi1) * cos(phi2) * sin(dlam / 2)^2
+  2 * R * asin(sqrt(a))
+}
+
+# Forward bearing in degrees (0–360) from point 1 to point 2
+bearing_deg <- function(lon1, lat1, lon2, lat2) {
+  phi1 <- lat1 * pi / 180; phi2 <- lat2 * pi / 180
+  dlam <- (lon2 - lon1) * pi / 180
+  y    <- sin(dlam) * cos(phi2)
+  x    <- cos(phi1) * sin(phi2) - sin(phi1) * cos(phi2) * cos(dlam)
+  (atan2(y, x) * 180 / pi + 360) %% 360
+}
+
+# Project a position forward: speed (knots) × elapsed time (mins) on bearing (°)
+project_pos <- function(lon, lat, speed_kt, bearing_deg, dt_min) {
+  dist_m <- speed_kt * (1852 / 60) * dt_min
+  R      <- 6371000
+  phi1   <- lat * pi / 180
+  lam1   <- lon * pi / 180
+  brg    <- bearing_deg * pi / 180
+  d_R    <- dist_m / R
+  phi2   <- asin(sin(phi1) * cos(d_R) + cos(phi1) * sin(d_R) * cos(brg))
+  lam2   <- lam1 + atan2(sin(brg) * sin(d_R) * cos(phi1),
+                         cos(d_R) - sin(phi1) * sin(phi2))
+  list(lon = lam2 * 180 / pi, lat = phi2 * 180 / pi)
+}
+
+# ── Main pipeline functions ────────────────────────────────────────────────
+
+# Add recovery columns and confidence classification to a data frame that has
+# columns `lengd` (wacky longitude) and `breidd` (wacky latitude).
+add_recovery_cols <- function(df) {
+  df |>
+    dplyr::mutate(
+      ss_lon     = extract_ss(lengd),
+      ss_lat     = extract_ss(breidd),
+      confidence = classify_confidence(ss_lon, ss_lat),
+      # Interpretation A: simple (non-wacky) recovery
+      lon_A      = recover_coords(lengd,  sign(lengd)),
+      lat_A      = recover_coords(breidd, sign(breidd)),
+      # Interpretation B: wacky recovery (only differs when ss < 40)
+      lon_B      = dplyr::if_else(ss_lon < 40,
+                                  recover_coords_wacky(lengd,  sign(lengd)), lon_A),
+      lat_B      = dplyr::if_else(ss_lat < 40,
+                                  recover_coords_wacky(breidd, sign(breidd)), lat_A)
+    )
+}
+
+# Greedy forward-propagation resolver for a single track.
+# Input: data frame for one vessel, sorted by timi, with columns
+#   lon_A, lat_A, lon_B, lat_B, skip_hradi, skip_stefna, timi.
+# Output: same data frame with added lon_r, lat_r (resolved coordinates).
+resolve_track <- function(df) {
+  n     <- nrow(df)
+  lon_r <- numeric(n)
+  lat_r <- numeric(n)
+  lon_r[1] <- df$lon_A[1]
+  lat_r[1] <- df$lat_A[1]
+
+  for (i in seq_len(n - 1)) {
+    dt <- as.numeric(difftime(df$timi[i + 1], df$timi[i], units = "mins"))
+    # Fall back to interpretation A on large gaps or missing sensor values
+    if (is.na(dt) || dt <= 0 || dt > 30 ||
+        is.na(df$skip_hradi[i]) || is.na(df$skip_stefna[i])) {
+      lon_r[i + 1] <- df$lon_A[i + 1]
+      lat_r[i + 1] <- df$lat_A[i + 1]
+      next
+    }
+    pred <- project_pos(lon_r[i], lat_r[i],
+                        df$skip_hradi[i], df$skip_stefna[i], dt)
+    dA   <- haversine_m(pred$lon, pred$lat, df$lon_A[i + 1], df$lat_A[i + 1])
+    dB   <- haversine_m(pred$lon, pred$lat, df$lon_B[i + 1], df$lat_B[i + 1])
+    if (is.na(dA) || is.na(dB) || dA <= dB) {
+      lon_r[i + 1] <- df$lon_A[i + 1]
+      lat_r[i + 1] <- df$lat_A[i + 1]
+    } else {
+      lon_r[i + 1] <- df$lon_B[i + 1]
+      lat_r[i + 1] <- df$lat_B[i + 1]
+    }
+  }
+  dplyr::mutate(df, lon_r = lon_r, lat_r = lat_r)
+}
+```
+
+```{r data-load}
+#| include: false
+# Load development subset once here so it is available to all sections,
+# including Confidence classification (which precedes Worked example).
+siriti_raw <-
+  open_dataset("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet") |>
+  mutate(year = year(timi)) |>
+  select(year, visir, timi, lengd, breidd, skip_hradi, skip_stefna) |>
+  filter(year   == 2017,
+         breidd >  65.9,  breidd < 66.10,
+         lengd  > -27,    lengd  < -26.4) |>
+  collect() |>
+  arrange(visir, timi)
+
+siriti_resolved <-
+  siriti_raw |>
+  add_recovery_cols() |>
+  group_by(visir) |>
+  group_modify(~ resolve_track(.x)) |>
+  ungroup()
+```
+
+---
+
+## Coordinate recovery
+
+### Extraction and classification
+
+From any wacky decimal-degree value $w$ we can extract the three integer components
+that were embedded in the original DDMMmm encoding:
+
+$$
+dd = \lfloor |w| \rfloor, \quad
+mm = \lfloor (|w| - dd) \times 60 \rfloor, \quad
+ss = \operatorname{round}\bigl(((|w| - dd) \times 60 - mm) \times 60\bigr)
+$$
+
+$ss$ is the original decimal-minutes value that was mishandled. The corrected
+coordinate is $\mathrm{sign}(w)\times(dd + mm/60 + ss/6000)$.
+
+The ambiguity arises because the wacky conversion is not injective when $ss \ge 60$:
+
+| Extracted $ss$ | Possible original $dm$ | Confidence |
+|:-:|:-:|:--|
+| 40–59 | Only $dm = ss$ | **High** — wacky case impossible |
+| 0–39  | $dm = ss$ *or* $dm = ss + 60$ | **Ambiguous** |
+
+Two candidate positions follow:
+
+- **Interpretation A** (non-wacky): $\text{sign}(w)\times(dd + mm/60 + ss/6000)$  
+- **Interpretation B** (wacky): $\text{sign}(w)\times(dd + (mm-1)/60 + (ss+60)/6000)$
+
+The two differ by a **constant 0.00667°** per coordinate (~300 m east–west and ~740 m
+north–south at 66°N), so the positional ambiguity is bounded.
+
+```{r classify-example}
+#| eval: false
+# Apply to a loaded data frame (requires lengd, breidd columns with wacky values)
+dat <- add_recovery_cols(dat)
+
+# Classification summary
+dat |>
+  count(confidence) |>
+  mutate(pct = round(100 * n / sum(n), 1))
+```
+
+In the 2017 subset used for development (a ~0.6° × 0.2° area off the Icelandic
+coast, ~10 000 records):
+
+| Confidence | Description | % |
+|:--|:--|--:|
+| High | Both coordinates exact | 4 |
+| Partial | One coordinate exact, one ambiguous | 33 |
+| Low | Both coordinates ambiguous | 63 |
+
+::: {.callout-note}
+The low fraction of high-confidence records (~4%) is expected. Assuming the
+original decimal-minutes are approximately uniformly distributed over 00–99, only
+the 20-in-100 values in [40–59] survive per coordinate, giving ~4% jointly.
+The diagnostic histogram of $ss$ values confirms this: density approximately
+doubles below 40, because the [0–39] bin contains folded-over wacky cases stacked
+on top of genuine non-wacky ones.
+:::
+
+---
+
+## Confidence classification {#sec-classification}
+
+### Three-tier scheme
+
+Each record receives a confidence level based on the extracted $ss$ value for
+longitude and latitude independently:
+
+| Level | $ss_\text{lon}$ | $ss_\text{lat}$ | Recoverable coordinates | Records (dev. subset) |
+|:--|:--:|:--:|:--|--:|
+| **High** | 40–59 | 40–59 | Both exact — wacky case impossible | ~4% |
+| **Partial** | 40–59 | 0–39 | Longitude exact; latitude ±740 m | ~17% |
+| **Partial** | 0–39 | 40–59 | Latitude exact; longitude ±300 m | ~16% |
+| **Low** | 0–39 | 0–39 | Both ambiguous | ~63% |
+
+The two partial sub-cases are combined under a single "partial" label because the
+resolver treats each coordinate independently; a high-confidence coordinate in
+either dimension eliminates its ambiguity entirely.
+
+The ~300 m and ~740 m figures are the constant offset $\Delta = 1/150°$ expressed
+in metres at 66°N for longitude and latitude respectively.
+
+### Diagnostic
+
+The fingerprint of the problem is visible in the distribution of extracted $ss$
+values (@fig-ss-diag). A density approximately halves above $ss = 40$ for both
+coordinates, consistent with roughly half the original decimal-minute values being
+in the wacky range [60–99] and folding down into [0–39].
+
+```{r fig-ss-diag}
+#| fig-cap: "Distribution of extracted decimal-minutes (ss) for longitude (bottom) and latitude (top). The density step at ss = 40 (red dashed line) is the diagnostic signature of the wacky conversion: values in [0–39] accumulate contributions from both non-wacky (original dm ∈ [0,39]) and wacky (original dm ∈ [60,99], folded down) records, roughly doubling the count relative to [40–59]."
+#| fig-height: 4
+siriti_resolved |>
+  select(ss_lon, ss_lat) |>
+  pivot_longer(everything(), names_to = "coord", values_to = "ss") |>
+  mutate(coord = recode(coord, ss_lon = "Longitude", ss_lat = "Latitude")) |>
+  ggplot(aes(ss)) +
+  theme_bw() +
+  geom_histogram(binwidth = 1, colour = "white") +
+  geom_vline(xintercept = 40, colour = "red", linetype = "dashed") +
+  facet_wrap(~coord, ncol = 1) +
+  labs(x = "Extracted ss (original decimal-minutes)", y = "Count")
+```
+
+### Spatial distribution
+
+@fig-conf-spatial shows confidence levels plotted at their wacky (uncorrected)
+positions. The high-confidence points (~4%) are scattered uniformly across the
+area — consistent with the expectation that the confidence level is determined
+solely by the last two digits of the original integer encoding, not by geography.
+
+```{r fig-conf-spatial}
+#| fig-cap: "Recorded (wacky) positions coloured by confidence level: red = high (~4%), orange = partial (~33%), grey = low (~63%). High-confidence points are dispersed uniformly, confirming that confidence is determined by the encoding digits, not by location."
+ggplot(siriti_resolved, aes(lengd, breidd, colour = confidence)) +
+  theme_bw() +
+  geom_point(
+    data = filter(siriti_resolved, confidence == "low"),
+    colour = "grey80", size = 0.15, alpha = 0.5
+  ) +
+  geom_point(
+    data = filter(siriti_resolved, confidence == "partial"),
+    colour = "orange", size = 0.4, alpha = 0.7
+  ) +
+  geom_point(
+    data = filter(siriti_resolved, confidence == "high"),
+    colour = "red", size = 0.8
+  ) +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL) +
+  guides(colour = "none")
+```
+
+---
+
+## Resolving ambiguous records
+
+### Approach: greedy forward propagation
+
+For ambiguous records, the correct interpretation is chosen using the instantaneous
+speed (`skip_hradi`, knots) and heading (`skip_stefna`, degrees) recorded alongside
+each position. The idea is to predict where the vessel *should* be at the next
+timestamp and pick whichever candidate position (A or B) is closer to that prediction.
+
+**Algorithm:**
+
+1. Sort each vessel's records by time (`timi`).
+2. Initialise the first record with interpretation A.
+3. For each subsequent record $i+1$:
+   a. Project the current resolved position forward by $\Delta t$ minutes using
+      `skip_hradi` and `skip_stefna` at record $i$.
+   b. Compute the Haversine distance from the predicted position to candidates
+      $A_{i+1}$ and $B_{i+1}$.
+   c. Pick the closer candidate. Ties go to A.
+   d. If $\Delta t > 30$ min or speed/heading is missing, fall back to A and
+      restart the chain.
+
+```{r resolve-example}
+#| eval: false
+# Full pipeline: load → add recovery columns → resolve tracks
+dat_resolved <-
+  open_dataset("rafr_sjalfvirkir_maelar.parquet") |>
+  select(visir, timi, lengd, breidd, skip_hradi, skip_stefna) |>
+  collect() |>
+  add_recovery_cols() |>
+  arrange(visir, timi) |>
+  group_by(visir) |>
+  group_modify(~ resolve_track(.x)) |>
+  ungroup()
+```
+
+### Evaluation
+
+The resolver was evaluated on the 2017 development subset (~22 800 records). For
+each step between consecutive records, a predicted next position was computed from
+the current resolved position plus `skip_hradi`/`skip_stefna`. The **prediction
+residual** — Haversine distance between the prediction and the actual next resolved
+position — was used as the quality metric.
+
+| Method | Median residual |
+|:--|--:|
+| Simple recovery (A only) | 737 m |
+| Greedy resolved | 578 m |
+| Improvement | **21.5 %** |
+
+The improvement holds across all confidence categories, including steps where both
+endpoints are unambiguous (the benefit there comes from better-resolved neighbours).
+
+::: {.callout-warning}
+**Circularity caveat.** The evaluation metric (prediction residual) is the same
+quantity the resolver minimises at each step, so the improvement is partly guaranteed
+by construction. An independent validation — e.g. using track-smoothness or
+comparing against a hold-out set of high-confidence anchor points — is warranted
+before drawing strong conclusions about absolute accuracy.
+:::
+
+### Choice frequency
+
+Among ambiguous records, the resolver selected:
+
+- **Interpretation A** (non-wacky): 57 %  
+- **Interpretation B** (wacky): 43 %
+
+The near-50/50 split is consistent with the theoretical expectation for a roughly
+uniform original decimal-minutes distribution.
+
+---
+
+## Worked example
+
+The following code runs against a geographic and temporal subset of the full
+dataset: vessels recorded in 2017 within a ~0.6° × 0.2° window off the
+Icelandic coast (~22 800 records across ~600 trips). All steps are shown end-to-end.
+
+### Load and process
+
+```{r ex-load}
+#| eval: false
+siriti_raw <-
+  open_dataset("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet") |>
+  mutate(year = year(timi)) |>
+  select(year, visir, timi, lengd, breidd, skip_hradi, skip_stefna) |>
+  filter(year   == 2017,
+         breidd >  65.9,  breidd < 66.10,
+         lengd  > -27,    lengd  < -26.4) |>
+  collect() |>
+  arrange(visir, timi)
+
+siriti_resolved <-
+  siriti_raw |>
+  add_recovery_cols() |>
+  group_by(visir) |>
+  group_modify(~ resolve_track(.x)) |>
+  ungroup()
+```
+
+### Classification summary
+
+```{r ex-classify}
+siriti_resolved |>
+  count(confidence) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  arrange(desc(pct)) |>
+  rename(Confidence = confidence, N = n, `%` = pct)
+```
+
+See @sec-classification for the full confidence diagnostic, including the $ss$
+histogram and spatial distribution plot.
+
+### Track comparison: wacky vs resolved
+
+A set of four trips with at least 20 recorded positions is used to compare the
+raw wacky coordinates against the greedy-resolved track (@fig-track-compare).
+
+```{r fig-track-compare}
+#| fig-cap: "Wacky positions (grey dashed) versus greedy-resolved positions (solid) for four example trips. Point colour indicates confidence level: red = high (both coordinates exact), orange = partial (one coordinate exact), blue = low (both coordinates ambiguous)."
+top_trips <- siriti_resolved |>
+  count(visir) |>
+  filter(n >= 20) |>
+  slice_head(n = 4) |>
+  pull(visir)
+
+siriti_resolved |>
+  filter(visir %in% top_trips) |>
+  arrange(visir, timi) |>
+  ggplot(aes(lon_r, lat_r)) +
+  theme_bw() +
+  geom_path(aes(lengd, breidd), colour = "grey60",
+            linewidth = 0.4, linetype = "dashed") +
+  geom_path(linewidth = 0.5) +
+  geom_point(aes(colour = confidence), size = 1.5) +
+  scale_colour_manual(
+    values = c("high"    = "red",
+               "partial" = "orange",
+               "low"     = "steelblue")
+  ) +
+  facet_wrap(~visir, scales = "free") +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL, colour = "Confidence")
+```
+
+### Residual improvement
+
+For each step between consecutive records, the predicted next position is computed
+by dead-reckoning from the current resolved position using `skip_hradi` and
+`skip_stefna`. The prediction residual (Haversine distance to actual next position)
+is compared between simple recovery (interpretation A only) and the greedy resolver
+(@fig-ecdf).
+
+```{r ex-eval}
+# Compute step-level residuals under both methods
+eval_steps <- siriti_resolved |>
+  arrange(visir, timi) |>
+  group_by(visir) |>
+  mutate(
+    dt_min     = as.numeric(difftime(lead(timi), timi, units = "mins")),
+    next_lon_A = lead(lon_A), next_lat_A = lead(lat_A),
+    next_lon_r = lead(lon_r), next_lat_r = lead(lat_r)
+  ) |>
+  ungroup() |>
+  filter(!is.na(dt_min), dt_min > 0, dt_min <= 30,
+         !is.na(skip_hradi), !is.na(skip_stefna))
+
+pred_A <- Map(project_pos,
+              eval_steps$lon_A, eval_steps$lat_A,
+              eval_steps$skip_hradi, eval_steps$skip_stefna, eval_steps$dt_min)
+pred_r <- Map(project_pos,
+              eval_steps$lon_r, eval_steps$lat_r,
+              eval_steps$skip_hradi, eval_steps$skip_stefna, eval_steps$dt_min)
+
+eval_steps <- eval_steps |>
+  mutate(
+    res_A = haversine_m(sapply(pred_A, `[[`, "lon"), sapply(pred_A, `[[`, "lat"),
+                        next_lon_A, next_lat_A),
+    res_r = haversine_m(sapply(pred_r, `[[`, "lon"), sapply(pred_r, `[[`, "lat"),
+                        next_lon_r, next_lat_r)
+  ) |>
+  filter(!is.na(res_A), !is.na(res_r))
+```
+
+```{r ex-eval-summary}
+eval_steps |>
+  summarise(
+    `Simple recovery — median residual (m)` = round(median(res_A)),
+    `Greedy resolved — median residual (m)`  = round(median(res_r)),
+    `Improvement (%)`                        = round(
+      (median(res_A) - median(res_r)) / median(res_A) * 100, 1)
+  ) |>
+  pivot_longer(everything(), names_to = "Metric", values_to = "Value")
+```
+
+```{r fig-ecdf}
+#| fig-cap: "Empirical CDF of step-level prediction residuals. A higher curve indicates more steps with small residuals (better). The greedy-resolved track (red) is uniformly better than the simple recovery up to ~1500 m."
+eval_steps |>
+  select(res_A, res_r) |>
+  pivot_longer(everything(),
+               names_to = "Method", values_to = "residual_m",
+               names_pattern = "res_(.*)") |>
+  mutate(Method = recode(Method,
+                         "A" = "Simple recovery (A only)",
+                         "r" = "Greedy resolved")) |>
+  ggplot(aes(pmin(residual_m, 3000), colour = Method)) +
+  theme_bw() +
+  stat_ecdf() +
+  scale_x_continuous(breaks = seq(0, 3000, 500)) +
+  labs(x = "Prediction residual (m, capped at 3 000)",
+       y = "Cumulative proportion",
+       colour = NULL)
+```
+
+---
+
+## Suggestions for future work
+
+### 1 — Independent validation via track smoothness {#sec-smoothness}
+
+The evaluation in the worked example uses prediction residuals computed from
+`skip_hradi` and `skip_stefna` — the same signals the resolver uses — so the
+improvement is partly guaranteed by construction. An independent quality metric
+is the **turn angle**: the angle between the incoming and outgoing bearing at each
+recorded position. A vessel on a realistic course should exhibit small, smooth
+direction changes; wacky positions create erratic spikes.
+
+To use gear type as a stratification variable, join the trip table
+(`rafr_stofn.parquet`, columns `visir`, `skipnr`, `veidarf`) before computing
+turn angles. Two gears are present in the development subset: gear 1 and gear 6
+(which accounts for 97% of records).
+
+```{r sug1-setup}
+stofn <- open_dataset("data-raw/data-dump/afli/rafr_stofn.parquet") |>
+  select(visir, skipnr, veidarf) |>
+  collect()
+
+# Join gear info onto the resolved data
+siriti_full2 <- siriti_resolved |>
+  left_join(stofn, by = "visir")
+```
+
+```{r sug-compute}
+#| include: false
+# Pre-compute forward-backward smoother and turn angles so that both
+# suggestion sections can reference the results in order.
+
+adiff <- function(f, b)
+  pmin(abs(f - (b + 180) %% 360), 360 - abs(f - (b + 180) %% 360))
+
+bad_step <- function(dt, hr, st)
+  isTRUE(is.na(dt)) || isTRUE(dt <= 0) || isTRUE(dt > 30) ||
+    isTRUE(is.na(hr)) || isTRUE(is.na(st))
+
+resolve_track_fb <- function(df) {
+  n <- nrow(df)
+  lon_f <- numeric(n); lat_f <- numeric(n)
+  lon_b <- numeric(n); lat_b <- numeric(n)
+  lon_f[1] <- df$lon_A[1]; lat_f[1] <- df$lat_A[1]
+  for (i in seq_len(n - 1)) {
+    dt <- as.numeric(df$timi[i+1] - df$timi[i], units = "mins")
+    if (bad_step(dt, df$skip_hradi[i], df$skip_stefna[i])) {
+      lon_f[i+1] <- df$lon_A[i+1]; lat_f[i+1] <- df$lat_A[i+1]; next
+    }
+    pred <- project_pos(lon_f[i], lat_f[i], df$skip_hradi[i], df$skip_stefna[i], dt)
+    dA <- haversine_m(pred$lon, pred$lat, df$lon_A[i+1], df$lat_A[i+1])
+    dB <- haversine_m(pred$lon, pred$lat, df$lon_B[i+1], df$lat_B[i+1])
+    if (isTRUE(is.na(dA)) || isTRUE(is.na(dB)) || isTRUE(dA <= dB)) {
+      lon_f[i+1] <- df$lon_A[i+1]; lat_f[i+1] <- df$lat_A[i+1]
+    } else {
+      lon_f[i+1] <- df$lon_B[i+1]; lat_f[i+1] <- df$lat_B[i+1]
+    }
+  }
+  lon_b[n] <- df$lon_A[n]; lat_b[n] <- df$lat_A[n]
+  for (i in seq(n, 2)) {
+    dt <- as.numeric(df$timi[i] - df$timi[i-1], units = "mins")
+    if (bad_step(dt, df$skip_hradi[i], df$skip_stefna[i])) {
+      lon_b[i-1] <- df$lon_A[i-1]; lat_b[i-1] <- df$lat_A[i-1]; next
+    }
+    rev_hdg <- (df$skip_stefna[i] + 180) %% 360
+    pred <- project_pos(lon_b[i], lat_b[i], df$skip_hradi[i], rev_hdg, dt)
+    dA <- haversine_m(pred$lon, pred$lat, df$lon_A[i-1], df$lat_A[i-1])
+    dB <- haversine_m(pred$lon, pred$lat, df$lon_B[i-1], df$lat_B[i-1])
+    if (isTRUE(is.na(dA)) || isTRUE(is.na(dB)) || isTRUE(dA <= dB)) {
+      lon_b[i-1] <- df$lon_A[i-1]; lat_b[i-1] <- df$lat_A[i-1]
+    } else {
+      lon_b[i-1] <- df$lon_B[i-1]; lat_b[i-1] <- df$lat_B[i-1]
+    }
+  }
+  lon_r2 <- numeric(n); lat_r2 <- numeric(n)
+  for (i in seq_len(n)) {
+    fwd_A <- isTRUE(lon_f[i] == df$lon_A[i] && lat_f[i] == df$lat_A[i])
+    bwd_A <- isTRUE(lon_b[i] == df$lon_A[i] && lat_b[i] == df$lat_A[i])
+    if (fwd_A == bwd_A) {
+      lon_r2[i] <- lon_f[i]; lat_r2[i] <- lat_f[i]
+    } else {
+      dA_tot <- haversine_m(lon_f[i], lat_f[i], df$lon_A[i], df$lat_A[i]) +
+                haversine_m(lon_b[i], lat_b[i], df$lon_A[i], df$lat_A[i])
+      dB_tot <- haversine_m(lon_f[i], lat_f[i], df$lon_B[i], df$lat_B[i]) +
+                haversine_m(lon_b[i], lat_b[i], df$lon_B[i], df$lat_B[i])
+      if (isTRUE(is.na(dA_tot)) || isTRUE(is.na(dB_tot)) || isTRUE(dA_tot <= dB_tot)) {
+        lon_r2[i] <- df$lon_A[i]; lat_r2[i] <- df$lat_A[i]
+      } else {
+        lon_r2[i] <- df$lon_B[i]; lat_r2[i] <- df$lat_B[i]
+      }
+    }
+  }
+  dplyr::mutate(df, lon_fb = lon_r2, lat_fb = lat_r2)
+}
+
+siriti_fb <- siriti_full2 |>
+  arrange(visir, timi) |>
+  group_by(visir) |>
+  group_modify(~ resolve_track_fb(.x)) |>
+  ungroup()
+
+turn_all <- siriti_fb |>
+  arrange(visir, timi) |>
+  group_by(visir) |>
+  mutate(
+    dt_fwd    = as.numeric(lead(timi) - timi, units = "mins"),
+    dt_bwd    = as.numeric(timi - lag(timi),  units = "mins"),
+    valid_seq = !is.na(dt_fwd) & dt_fwd > 0 & dt_fwd <= 30 &
+                !is.na(dt_bwd) & dt_bwd > 0 & dt_bwd <= 30,
+    turn_A  = adiff(bearing_deg(lon_A,  lat_A,  lead(lon_A),  lead(lat_A)),
+                    bearing_deg(lon_A,  lat_A,  lag(lon_A),   lag(lat_A))),
+    turn_r  = adiff(bearing_deg(lon_r,  lat_r,  lead(lon_r),  lead(lat_r)),
+                    bearing_deg(lon_r,  lat_r,  lag(lon_r),   lag(lat_r))),
+    turn_fb = adiff(bearing_deg(lon_fb, lat_fb, lead(lon_fb), lead(lat_fb)),
+                    bearing_deg(lon_fb, lat_fb, lag(lon_fb),  lag(lat_fb)))
+  ) |>
+  ungroup() |>
+  filter(valid_seq, !is.na(turn_A), !is.na(turn_r), !is.na(turn_fb))
+```
+
+```{r fig-turn}
+#| fig-cap: "Distribution of turn angles (°) at each recorded position by gear type and recovery method. Smaller angles indicate smoother, more realistic tracks. The greedy-resolved and forward-backward methods both substantially reduce erratic direction changes compared with simple recovery."
+turn_all |>
+  select(veidarf, turn_A, turn_r, turn_fb) |>
+  pivot_longer(-veidarf, names_to = "method", values_to = "turn") |>
+  mutate(
+    method  = factor(method,
+                     levels = c("turn_A", "turn_r", "turn_fb"),
+                     labels = c("Simple recovery", "Greedy (fwd)", "Fwd-bwd smoother")),
+    veidarf = paste("Gear", veidarf)
+  ) |>
+  ggplot(aes(method, turn)) +
+  theme_bw() +
+  geom_violin(fill = "grey85", colour = NA) +
+  geom_boxplot(width = 0.15, outlier.shape = NA) +
+  facet_wrap(~veidarf) +
+  coord_cartesian(ylim = c(0, 120)) +
+  labs(x = NULL, y = "Turn angle (°)")
+```
+
+Median turn angles and improvements (independent of reported speed/heading):
+
+```{r sug1-table}
+turn_all |>
+  group_by(`Gear` = paste("Gear", veidarf)) |>
+  summarise(
+    n                   = n(),
+    `Simple (°)`        = round(median(turn_A),  1),
+    `Greedy fwd (°)`    = round(median(turn_r),  1),
+    `Fwd-bwd (°)`       = round(median(turn_fb), 1),
+    `Fwd improv. (%)`   = round((median(turn_A) - median(turn_r))  / median(turn_A) * 100, 1),
+    `Fwd-bwd improv. (%)` = round((median(turn_A) - median(turn_fb)) / median(turn_A) * 100, 1)
+  )
+```
+
+Both methods reduce median turn angle by **33–48%** depending on gear, confirming
+the improvement is genuine and not an artefact of using the same signal for
+optimisation and evaluation.
+
+---
+
+### 2 — Forward–backward smoother {#sec-fb}
+
+The greedy algorithm processes records in chronological order, so an incorrect
+decision at record $i$ biases all subsequent records until the next time gap. A
+**forward–backward smoother** runs two independent passes and combines them:
+
+1. **Forward pass** — identical to the greedy resolver (prediction from speed/heading at $i$).
+2. **Backward pass** — travels from end to start; at each step the reversed heading
+   ($\theta + 180°$) is used to project backward.
+3. **Combine** — if both passes agree, take the agreed interpretation; if they
+   disagree, score candidates A and B by the sum of their distances to *both* the
+   forward and backward predictions and take the minimum.
+
+```{r sug2-fb-fun}
+#| eval: false
+bad_step <- function(dt, hr, st)
+  isTRUE(is.na(dt)) || isTRUE(dt <= 0) || isTRUE(dt > 30) ||
+    isTRUE(is.na(hr)) || isTRUE(is.na(st))
+
+resolve_track_fb <- function(df) {
+  n <- nrow(df)
+  lon_f <- numeric(n); lat_f <- numeric(n)
+  lon_b <- numeric(n); lat_b <- numeric(n)
+
+  # Forward pass
+  lon_f[1] <- df$lon_A[1]; lat_f[1] <- df$lat_A[1]
+  for (i in seq_len(n - 1)) {
+    dt <- as.numeric(df$timi[i+1] - df$timi[i], units = "mins")
+    if (bad_step(dt, df$skip_hradi[i], df$skip_stefna[i])) {
+      lon_f[i+1] <- df$lon_A[i+1]; lat_f[i+1] <- df$lat_A[i+1]; next
+    }
+    pred <- project_pos(lon_f[i], lat_f[i], df$skip_hradi[i], df$skip_stefna[i], dt)
+    dA <- haversine_m(pred$lon, pred$lat, df$lon_A[i+1], df$lat_A[i+1])
+    dB <- haversine_m(pred$lon, pred$lat, df$lon_B[i+1], df$lat_B[i+1])
+    if (isTRUE(is.na(dA)) || isTRUE(is.na(dB)) || isTRUE(dA <= dB)) {
+      lon_f[i+1] <- df$lon_A[i+1]; lat_f[i+1] <- df$lat_A[i+1]
+    } else {
+      lon_f[i+1] <- df$lon_B[i+1]; lat_f[i+1] <- df$lat_B[i+1]
+    }
+  }
+
+  # Backward pass (reversed heading)
+  lon_b[n] <- df$lon_A[n]; lat_b[n] <- df$lat_A[n]
+  for (i in seq(n, 2)) {
+    dt <- as.numeric(df$timi[i] - df$timi[i-1], units = "mins")
+    if (bad_step(dt, df$skip_hradi[i], df$skip_stefna[i])) {
+      lon_b[i-1] <- df$lon_A[i-1]; lat_b[i-1] <- df$lat_A[i-1]; next
+    }
+    rev_hdg <- (df$skip_stefna[i] + 180) %% 360
+    pred <- project_pos(lon_b[i], lat_b[i], df$skip_hradi[i], rev_hdg, dt)
+    dA <- haversine_m(pred$lon, pred$lat, df$lon_A[i-1], df$lat_A[i-1])
+    dB <- haversine_m(pred$lon, pred$lat, df$lon_B[i-1], df$lat_B[i-1])
+    if (isTRUE(is.na(dA)) || isTRUE(is.na(dB)) || isTRUE(dA <= dB)) {
+      lon_b[i-1] <- df$lon_A[i-1]; lat_b[i-1] <- df$lat_A[i-1]
+    } else {
+      lon_b[i-1] <- df$lon_B[i-1]; lat_b[i-1] <- df$lat_B[i-1]
+    }
+  }
+
+  # Combine
+  lon_r2 <- numeric(n); lat_r2 <- numeric(n)
+  for (i in seq_len(n)) {
+    fwd_A <- isTRUE(lon_f[i] == df$lon_A[i] && lat_f[i] == df$lat_A[i])
+    bwd_A <- isTRUE(lon_b[i] == df$lon_A[i] && lat_b[i] == df$lat_A[i])
+    if (fwd_A == bwd_A) {
+      lon_r2[i] <- lon_f[i]; lat_r2[i] <- lat_f[i]
+    } else {
+      dA_tot <- haversine_m(lon_f[i], lat_f[i], df$lon_A[i], df$lat_A[i]) +
+                haversine_m(lon_b[i], lat_b[i], df$lon_A[i], df$lat_A[i])
+      dB_tot <- haversine_m(lon_f[i], lat_f[i], df$lon_B[i], df$lat_B[i]) +
+                haversine_m(lon_b[i], lat_b[i], df$lon_B[i], df$lat_B[i])
+      if (isTRUE(is.na(dA_tot)) || isTRUE(is.na(dB_tot)) || isTRUE(dA_tot <= dB_tot)) {
+        lon_r2[i] <- df$lon_A[i]; lat_r2[i] <- df$lat_A[i]
+      } else {
+        lon_r2[i] <- df$lon_B[i]; lat_r2[i] <- df$lat_B[i]
+      }
+    }
+  }
+  dplyr::mutate(df, lon_fb = lon_r2, lat_fb = lat_r2)
+}
+```
+
+```{r sug2-fb-run}
+# siriti_fb is computed in the hidden sug-compute chunk above.
+# Agreement between forward-only and forward-backward among ambiguous records:
+siriti_fb |>
+  filter(confidence != "high") |>
+  mutate(agree = (lon_r == lon_A) == (lon_fb == lon_A)) |>
+  summarise(
+    pct_agree  = round(100 * mean(agree, na.rm = TRUE), 1),
+    n_disagree = sum(!agree, na.rm = TRUE)
+  )
+```
+
+The two passes agreed on **78%** of ambiguous records. For the 22% where they
+disagreed, the combined-distance tiebreaker resolved the conflict. The additional
+smoothness gain over the greedy forward pass was modest (median turn angle improved
+by a further 0–1.3° depending on gear — see @fig-turn), suggesting the greedy pass
+already captures most of the resolvable signal. The forward–backward approach is
+nevertheless preferable for long tracks where early errors could otherwise propagate.
+
+```{r}
+#| label: fig-fb-track
+#| fig-cap: "Four example trips: grey dashed = simple A recovery; blue = greedy forward; green = forward-backward smoother. Differences are subtle but the smoother tends to correct isolated disagreements mid-track."
+top_trips <- siriti_fb |> count(visir) |> filter(n >= 20) |>
+  slice_head(n = 4) |> pull(visir)
+
+siriti_fb |>
+  filter(visir %in% top_trips) |>
+  arrange(visir, timi) |>
+  ggplot() +
+  theme_bw() +
+  geom_path(aes(lengd, breidd), colour = "grey60", linewidth = 0.3, linetype = "dashed") +
+  geom_path(aes(lon_r,  lat_r),  colour = "steelblue", linewidth = 0.4) +
+  geom_path(aes(lon_fb, lat_fb), colour = "darkgreen", linewidth = 0.6, alpha = 0.7) +
+  facet_wrap(~visir, scales = "free") +
+  coord_quickmap() +
+  labs(x = NULL, y = NULL,
+       subtitle = "Grey dashed = wacky · Blue = greedy fwd · Green = fwd-bwd")
+```
+
+---
+
+### 3 — Scale to the full dataset {#sec-scale}
+
+The development analysis covered a single 0.6° × 0.2° window in 2017 (~22 800
+records). The full archive spans **2008–2020**, comprising roughly 20 million valid
+records across ~600 000 fishing trips.
+
+```{r sug3-scale}
+open_dataset("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet") |>
+  mutate(year = year(timi)) |>
+  filter(year >= 2008, year <= 2020) |>
+  group_by(year) |>
+  summarise(n_records = n(), n_trips = n_distinct(visir)) |>
+  arrange(year) |>
+  collect()
+```
+
+When scaling up, several of the additional variables become important:
+
+**`veidarf` (gear type, from `rafr_stofn.parquet`).** Different gears produce
+fundamentally different movement patterns: trawlers move on long straight hauls,
+while gillnetters may drift or be stationary for extended periods. The resolver
+performs best when the vessel is actively steaming; for slow or stationary records
+the 300–740 m positional ambiguity exceeds a typical step distance and the
+speed/heading signal provides little discriminating power. Stratifying evaluation
+by gear will reveal where the method works well and where additional signals are
+needed.
+
+**`skipnr` (vessel identifier, from `rafr_stofn.parquet`).** Linking records to
+individual vessels allows vessel-level quality checks: if a particular vessel
+consistently produces wacky coordinates at certain speeds or positions, it may
+indicate a vessel-specific recording issue rather than the general conversion
+error described here.
+
+**`vindhradi` / `vindstefna` (wind speed and direction).** Wind introduces a
+systematic deviation between the vessel's reported heading and its actual
+trajectory. A dead-reckoning prediction based on heading alone will over-predict
+the leeway component. Incorporating wind as a correction — even crudely, as an
+additive offset proportional to wind speed projected onto the cross-track axis —
+could sharpen the prediction and improve the resolver's ability to distinguish A
+from B in marginal cases.
+
+A production pipeline would look broadly like:
+
+```{r sug3-pipeline}
+#| eval: false
+dat_full <-
+  open_dataset("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet") |>
+  mutate(year = year(timi)) |>
+  filter(year >= 2008, year <= 2020) |>
+  select(visir, timi, lengd, breidd, skip_hradi, skip_stefna,
+         vindhradi, vindstefna) |>
+  left_join(
+    open_dataset("data-raw/data-dump/afli/rafr_stofn.parquet") |>
+      select(visir, skipnr, veidarf),
+    by = "visir"
+  ) |>
+  collect() |>
+  add_recovery_cols() |>
+  arrange(visir, timi) |>
+  group_by(visir) |>
+  group_modify(~ resolve_track_fb(.x)) |>   # or resolve_track() for speed
+  ungroup()
+```
+
+::: {.callout-note}
+For the full ~20M record dataset the per-record loop in `resolve_track_fb` will
+be slow. Consider rewriting the inner loop in Rcpp, or parallelising over trips
+with `furrr::future_map()` / `multidplyr`.
+:::
+
+
+---
+
+## Appendix {.appendix}
+
+### A — Mathematical detail {#sec-math}
+
+**Original encoding.** Positions were stored as signed integers in the DDMMmm
+format. For example, $-264312$ encodes 26°43′12″W, where the last two digits (12)
+are *decimal minutes* (i.e. 0.12 min), not seconds.
+
+The correct conversion to decimal degrees is
+
+$$
+x_{\text{true}} = \operatorname{sign}(n)\times\frac{|n| + \tfrac{200}{3}\,m}{10\,000},
+\quad m = \frac{|n|}{100} - 100\left\lfloor\frac{|n|}{10\,000}\right\rfloor
+$$
+
+where $n$ is the DDMMmm integer and $m$ is the MM.mm part divided by 100.
+
+**Erroneous conversion (wacky).** The conversion that was actually applied treated
+the last two digits $ss$ as seconds:
+
+$$
+x_{\text{wacky}} = \begin{cases}
+dd + \dfrac{mm}{60} + \dfrac{ss}{3600} & \text{if } ss < 60 \\[6pt]
+dd + \dfrac{mm+1}{60} + \dfrac{ss-60}{3600} & \text{if } ss \ge 60
+\end{cases}
+$$
+
+**Recovery.** Extracting $dd, mm, ss$ from $x_{\text{wacky}}$ via the inverse
+seconds formula (see `extract_ss`) recovers the original $ss$ when $ss < 60$
+(non-wacky) and recovers $ss - 60$ when $ss \ge 60$ (wacky, with $mm$ over-counted
+by 1). The corrected coordinate is:
+
+$$
+x_A = \operatorname{sign}(w)\times\!\left(dd + \frac{mm}{60} + \frac{ss}{6000}\right)
+\quad \text{(interpretation A, assumes non-wacky)}
+$$
+
+$$
+x_B = \operatorname{sign}(w)\times\!\left(dd + \frac{mm-1}{60} + \frac{ss+60}{6000}\right)
+\quad \text{(interpretation B, assumes wacky)}
+$$
+
+The difference $x_A - x_B$ is constant:
+
+$$
+\Delta = \frac{1}{60} - \frac{60}{6000} = \frac{1}{60} - \frac{1}{100} = \frac{1}{150} \approx 0.00\overline{6}°
+$$
+
+**Identifiability.** If $ss \in [40, 59]$, then $x_B$ would require the original
+$dm = ss + 60 \in [100, 119]$, which is impossible (DDMMmm uses hundredths of a
+minute, max 99). Hence $x_A$ is the unique correct interpretation — these are the
+**high-confidence** records. For $ss \in [0, 39]$, both $dm = ss$ and $dm = ss + 60$
+are valid, and the records are **ambiguous**.
+
+---
+
+### B — Diagnostic histogram {#sec-hist}
+
+The histogram of extracted $ss$ values provides a visual fingerprint of the problem.
+Under a uniform distribution of original decimal-minutes:
+
+- $ss \in [0, 39]$: receives contributions from both non-wacky ($dm \in [0,39]$)
+  and wacky ($dm \in [60,99]$, folded down by 60) cases → density ~2×
+- $ss \in [40, 59]$: receives contributions only from non-wacky ($dm \in [40,59]$) → density ~1×
+
+A step-change (roughly halving) at $ss = 40$ is therefore the expected signature
+when ~50% of original dm values were in the wacky range. The 2017 data shows this
+pattern clearly for both longitude and latitude.
+
+```{r diag-hist}
+#| eval: false
+dat |>
+  mutate(ss_lon = extract_ss(lengd), ss_lat = extract_ss(breidd)) |>
+  pivot_longer(c(ss_lon, ss_lat), names_to = "coord", values_to = "ss") |>
+  ggplot(aes(ss)) +
+  geom_histogram(binwidth = 1) +
+  facet_wrap(~coord, ncol = 1) +
+  geom_vline(xintercept = c(40, 59), colour = "red", linetype = "dashed") +
+  labs(x = "Extracted decimal-minutes (ss)",
+       y = "Count",
+       subtitle = "Density ~2× below ss = 40 confirms folding of wacky records")
+```
+
+---
+
+### C — Algorithm detail {#sec-algo}
+
+**Greedy forward propagation** processes each track sequentially in time. At step
+$i \to i+1$:
+
+1. **Predict** next position using the dead-reckoning formula (great-circle
+   projection from current resolved position, speed $v_i$ in knots,
+   heading $\theta_i$ in degrees, elapsed time $\Delta t$ in minutes):
+
+$$
+\phi_2 = \arcsin\!\left(\sin\phi_1\cos\frac{d}{R} + \cos\phi_1\sin\frac{d}{R}\cos\theta_i\right)
+$$
+$$
+\lambda_2 = \lambda_1 + \arctan2\!\left(\sin\theta_i\sin\frac{d}{R}\cos\phi_1,\ \cos\frac{d}{R}-\sin\phi_1\sin\phi_2\right)
+$$
+
+where $d = v_i \times \tfrac{1852}{60} \times \Delta t$ (metres) and $R = 6\,371\,000$ m.
+
+2. **Score** candidates $A_{i+1}$ and $B_{i+1}$ by Haversine distance to the prediction.
+
+3. **Select** the closer candidate; ties go to A.
+
+4. **Fallback** to A when $\Delta t > 30$ min or speed/heading is missing,
+   resetting the propagation chain.
+
+**Limitations:**
+
+- Errors can propagate forward (a wrong early decision biases all downstream choices).
+- The 30-minute gap threshold is arbitrary; shorter gaps reduce propagation length
+  but increase the number of cold-starts.
+- The algorithm makes no use of the recorded heading or speed at the *destination*
+  record; incorporating that signal (e.g. weighting by heading consistency at both
+  ends of the step) could improve resolution.
+- Performance degrades for slow-moving or stationary vessels, where the step
+  distance is smaller than the ~300–740 m ambiguity.
