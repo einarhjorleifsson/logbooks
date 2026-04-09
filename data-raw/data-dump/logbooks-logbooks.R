@@ -11,7 +11,7 @@ for(i in 1:nrow(tables)) {
     tbl_mar(con, tbl) |>
     collect()
   if(nrow(d) > 0) {
-    d |> duckdbfs::write_dataset(paste0("data-raw/data-dump/logbooks-brim/logbooks_", fil))
+    d |> duckdbfs::write_dataset(paste0("data-raw/data-dump/logbooks-logbooks/logbooks_", fil))
   }
 }
 
