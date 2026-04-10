@@ -8,7 +8,12 @@ library(tidyverse)
 library(nanoparquet)
 
 # seeding ----------------------------------------------------------------------
-dictionary <- read_parquet("data/dictionary.parquet")
+SCHEMA <- "afli"
+dictionary <- read_parquet("data/dictionary.parquet") |>
+  filter(schema == SCHEMA)
+
+#' trip ------------------------------------------------------------------------
+#' NOTE: No trip table in this schema - is derived from base below
 
 # base -------------------------------------------------------------------------
 base <-
@@ -28,16 +33,16 @@ base <-
                 # environmental parameters
                 # winddirection, beaufort, m_sec,
                 # landings statistics
-                D2, hid2, n_crew,
+                T2, hid2, n_crew,
                 dplyr::everything()) |>
-  group_by(vid, D2, hid2) |>
+  group_by(vid, T2, hid2) |>
   mutate(.tid = min(.sid)) |>
   group_by(vid, .tid) |>
   # should one have a comment here, fake data
-  mutate(D1 = min(date, na.rm = TRUE), # maximum departure date
+  mutate(T1 = min(date, na.rm = TRUE), # maximum departure date
          hid1 = NA_integer_) |>
   ungroup() |>
-  mutate(source = "afli")
+  mutate(schema = schema)
 
 # QC
 base |>
@@ -50,17 +55,19 @@ base |>
                                  .default = lat2),
                 lon2 = case_when(.sid < 0 & lon2 <= -50 ~ NA,
                                  .default = lon2))
-# trip -------------------------------------------------------------------------
+# trip derived -----------------------------------------------------------------
+#' NOTE
+#'  D! is derived from the first recorded fishing date
 trip <-
   base |>
   group_by(.tid) |>
-  select(.tid, vid, D1, hid1, D2, hid2, n_crew, source) |>
+  select(.tid, vid, T1, hid1, T2, hid2, n_crew, schema) |>
   distinct()
 
 # remains to pass downstream
 base <-
   base |>
-  select(.tid, .sid, gid:z2, source)
+  select(.tid, .sid, gid:z2, schema)
 
 # mobile -----------------------------------------------------------------------
 mobile <-
@@ -100,7 +107,7 @@ mobile <-
                 effort, effort_unit,
                 towtime,                     # in minutes, t1 and t2 could not be derived
                 gear_width,
-                source) |>
+                schema) |>
   select(-c(hh, mm))
 
 # static -----------------------------------------------------------------------
@@ -130,7 +137,7 @@ static <-
          lon1:z2,
          effort,
          effort_unit,
-         source)
+         schema)
 
 # traps ------------------------------------------------------------------------
 traps <-
@@ -148,7 +155,7 @@ traps <-
                            .default = hours)) |>
   dplyr::mutate(effort = n_units * hours,
                 effort_unit = "traphours") |>
-  select(.tid:z2, effort, effort_unit, source)
+  select(.tid:z2, effort, effort_unit, schema)
 
 # seine ------------------------------------------------------------------------
 seine <-
@@ -163,7 +170,7 @@ seine <-
                 t1 = as_datetime(date) + hours(hh) + minutes(mm),
                 .after = date) |>
   select(-c(hh, mm)) |>
-  select(.tid:z2, effort, effort_unit, source)
+  select(.tid:z2, effort, effort_unit, schema)
 
 # station table ----------------------------------------------------------------
 station <-
@@ -183,7 +190,7 @@ catch <-
   summarise(catch = sum(catch, na.rm = TRUE),
             .groups = "drop") |>
   # ensure that catch record not an orphan
-  inner_join(station |> select(.sid, source)) |>
+  inner_join(station |> select(.sid, schema)) |>
   arrange(.sid, sid)
 
 

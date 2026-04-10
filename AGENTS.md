@@ -110,6 +110,37 @@ and are converted to decimal degrees via `geo::geoconvert.1()` (multiplied by
 | `skip_hradi` | `skip_hradi` | Instantaneous vessel speed (knots) |
 | `skip_stefna` | `skip_stefna` | Instantaneous vessel heading (degrees) |
 
+### `gear/` — gear code vocabulary (hand-maintained)
+
+Script: `data-raw/DATASET_gear-codes.R`
+Output: `data/gear/gear_mapping.parquet`
+Reference: `data-raw/data-dump/gear/asfis.parquet` (loaded but not yet used)
+
+The `gear_mapping` table maps gear codes between the two logbook schemas and
+assigns ICES metier vocabulary (`gear`, `target`). One row per gear per version.
+
+| Column | Description |
+|---|---|
+| `version` | `"old"` (afli) or `"new"` (fs_afladagbok) |
+| `gid` | Gear code in this version |
+| `veiðarfæri` | Icelandic gear name |
+| `map` | Canonical counterpart gid in the **other** version |
+| `gear` | ICES GearType code (e.g. `"OTB"`, `"LLS"`) |
+| `target` | ICES TargetAssemblage code (e.g. `"DEF"`, `"SPF"`) |
+
+**`map` semantics** — one-way canonical lookup only. For "new" rows `map`
+gives the corresponding old gid; for "old" rows `map` gives the corresponding
+new gid. The mapping is many-to-one in both directions because the old schema
+used more granular sub-types (e.g. three mesh-size variants of seine net → one
+"Dragnót"; five midwater trawl sub-types → one "Flotvarpa"). Round-trips
+(old → new → old or new → old → new) are therefore lossy for collapsed gears;
+the reverse lookup always returns the canonical representative, not the
+original sub-type. Do **not** rely on `map` for bijective conversion.
+
+The "old" side includes codes 91 (Skötuselsnet), 92 (Grálúðunet), and 99
+(Óskráð veiðarfæri) which are not recorded in the afli logbooks but exist as
+targets of `map` from "new" codes.
+
 ### `fs_afladagbok/` — FisheryScan digital logbooks (static dump)
 
 Modern electronic submission format from Fiskistofa; records through 2025-12.
