@@ -1,0 +1,18 @@
+---
+title: "Icelandic Fishing Logbooks"
+---
+
+Icelandic fishing vessels are required to record their catches and fishing
+activity in logbooks. These records — covering gear type, location, timing,
+and species caught — form the backbone of fisheries monitoring and stock
+assessment in Iceland.
+
+This site documents the work of consolidating logbook data from three separate
+source systems into a single, consistent dataset spanning several decades. The
+main challenges are that the systems use different formats and codes, their
+records partially overlap in time, and the data contain various quality issues
+that need to be identified and resolved before the data can be used reliably.
+
+The pages here cover the structure of the raw data, the processing steps
+applied to each source, known data quality problems and how they are addressed,
+and the logic used to merge the sources into one unified record.

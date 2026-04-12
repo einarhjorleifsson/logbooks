@@ -10,6 +10,8 @@ website:
       - text: Structure
         menu:
           - structure.qmd
+          - convert-bugs.qmd
+          - merge.qmd
           - wacky_recovery.qmd
       - text: Logbooks
         menu:

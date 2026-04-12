@@ -106,6 +106,7 @@ fs_afladagbok <- tibble::tribble(
   "hid2",   "londunarhofn",             "fs_afladagbok",
   "source", "uppruni",                  "fs_afladagbok",
   # ws_veidi.parquet (stations)
+  #".sid",   "veidi_id",                 "fs_afladagbok",
   "gid",    "veidarfaeri_id",           "fs_afladagbok",
   "t0",     "upphaf_timi",              "fs_afladagbok",   # gear deployment (static)
   "t1",     "milli_timi",               "fs_afladagbok",   # hauling starts
@@ -116,7 +117,19 @@ fs_afladagbok <- tibble::tribble(
   "y2",     "lok_breidd",               "fs_afladagbok",
   "z1",     "upphaf_dypi",              "fs_afladagbok",
   "z2",     "lok_dypi",                 "fs_afladagbok",
-  "n_lost", "fj_tapadra_veidarfaera",   "fs_afladagbok",
+  "n_lost",  "fj_tapadra_veidarfaera",   "fs_afladagbok",
+  "sweeps",  "grandarar_lengd",          "fs_afladagbok",
+  # shared foreign key across gear sub-tables (ws_dragnot_varpa, ws_linanethandf, ws_gildra, ws_hringn, ws_plogur)
+  ".sid",    "veidi_id",                 "fs_afladagbok",
+  # ws_linanethandf columns
+  "n_hooks", "fj_kroka",                 "fs_afladagbok",
+  "n_nets",  "fj_dreginna_neta",         "fs_afladagbok",
+  "n_jigs",  "fj_faera",                 "fs_afladagbok",
+  # ws_gildra columns
+  "n_units", "fj_gildra",                "fs_afladagbok",
+  # ws_afli columns
+  "sid",     "tegund_id",                "fs_afladagbok",
+  "catch",   "afli",                     "fs_afladagbok"
 )
 
 # ------------------------------------------------------------------------------

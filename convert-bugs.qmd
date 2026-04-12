@@ -1,0 +1,210 @@
+---
+title: "Convert script audit: station record loss"
+date: 2026-04-11
+---
+
+## Overview
+
+Both `scripts/01_adb_convert.R` and `scripts/01_fs_afladagbok_convert.R` shared
+two bugs that caused a large fraction of fishing stations to be silently dropped
+from the output `station.parquet` files.  The bugs were identified by comparing
+the `adb` script output against a brute-force reference implementation
+(`scripts/01_adb_convert_brute-force.R`), then the same patterns were checked in
+the `fs_afladagbok` script.
+
+| Schema | Stations before fix | Stations after fix | Recovered |
+|---|---:|---:|---:|
+| `adb` | 455,897 | 628,130 | 172,233 |
+| `fs_afladagbok` | 350,172 | 469,881 | 119,709 |
+
+---
+
+## Bug 1 — `bind_rows` of inner joins drops stations without aux records
+
+### What happened
+
+Both scripts assembled the `station` table by splitting the base station set
+into gear-class blocks, inner-joining each block to a gear-specific auxiliary
+parquet (trawl widths, hook counts, etc.), and `bind_rows`-ing the results:
+
+```r
+# BEFORE (both scripts)
+station <- bind_rows(static, mobile, seine, traps)
+#   where each of the above is:  base |> [optional filter] |> inner_join(aux_table)
+```
+
+Any station whose `.sid` is absent from **all** auxiliary tables is silently
+dropped.  This is not a rare edge case — 25–27% of stations have no matching
+gear detail record, particularly in earlier years when those tables were not
+yet populated upstream.
+
+### Why stations are absent from aux tables
+
+Absence is a genuine upstream data sparsity issue, not a processing error.  For
+the `adb` schema, the trawl auxiliary table (`trawl_and_seine_net_v`) is
+completely unpopulated for gid 6 trips in 2020–2021:
+
+```{r}
+#| label: tbl-aux-coverage
+#| tbl-cap: "gid 6 coverage in trawl_and_seine_net_v by year"
+library(nanoparquet)
+library(tidyverse)
+
+station_v <- read_parquet("data-raw/data-dump/adb/station_v.parquet")
+trawl     <- read_parquet("data-raw/data-dump/adb/trawl_and_seine_net_v.parquet")
+
+station_v |>
+  filter(gear_no == 6) |>
+  mutate(in_trawl = station_id %in% trawl$station_id,
+         year     = year(fishing_start)) |>
+  count(year, in_trawl) |>
+  tidyr::spread(in_trawl, n, fill = 0) |>
+  rename(not_in_trawl = `FALSE`, in_trawl = `TRUE`) |>
+  mutate(pct_missing = round(100 * not_in_trawl / (not_in_trawl + in_trawl), 1)) |>
+  filter(between(year, 2019, 2026)) |>
+  knitr::kable(col.names = c("Year", "Not in trawl aux", "In trawl aux", "% missing"))
+```
+
+### Fix
+
+Build compact effort tables for each gear class (inner-joining the aux table
+only to compute effort), combine them, and **left-join onto base** so all
+stations are retained regardless of aux coverage:
+
+```r
+# AFTER (both scripts, illustrated for one gear class)
+mobile_aux <-
+  read_parquet("...trawl_and_seine_net_v.parquet") |>
+  wk_translate(dictionary) |>
+  inner_join(base |> select(.sid, gid, t1, t2), by = ".sid") |>
+  mutate(towtime = as.numeric(difftime(t2, t1, units = "mins")),
+         effort = ..., effort_unit = ...) |>
+  select(.sid, effort, effort_unit, towtime, gear_width)
+
+station <-
+  base |>
+  left_join(bind_rows(mobile_aux, dredge_aux, static_aux, trap_aux, seine_aux),
+            by = ".sid") |>
+  arrange(date, .sid, t0, t1, t2)
+```
+
+Stations without an aux record retain all base columns; effort columns are `NA`.
+
+---
+
+## Bug 2 — `date` derived from a mostly-NA time column
+
+### What happened
+
+Both scripts computed `date` from the middle time column (`t1`), which maps
+to `tow_start` (adb) and `milli_timi` / intermediate time (fs_afladagbok).
+Both columns are sparsely populated:
+
+| Schema | Column behind `t1` | NA rate |
+|---|---|---:|
+| `adb` | `tow_start` | ~42 % |
+| `fs_afladagbok` | `milli_timi` | 77.6 % |
+
+In the `fs_afladagbok` case this caused **70 % of the output station records to
+have `NA` dates**, making year-based filtering and aggregation essentially
+useless.
+
+```{r}
+#| label: tbl-date-na
+#| tbl-cap: "NA date rate before and after fix"
+tibble::tribble(
+  ~Schema,          ~`Before (NA %)`, ~`After (NA %)`,
+  "adb",            "~42",            "0",
+  "fs_afladagbok",  "69.9",           "0"
+) |>
+  knitr::kable()
+```
+
+### Fix
+
+Use `coalesce()` across all three time columns, falling back to the start time
+(`t0`) which is always populated:
+
+```r
+# BEFORE
+mutate(date = as_date(t1))
+
+# AFTER
+mutate(date = as_date(coalesce(t0, t1, t2)))
+```
+
+---
+
+## Additional bugs fixed in `01_adb_convert.R`
+
+### Missing `dredge_v` aux table
+
+The `adb` script had no gear block for `dredge_v.parquet`.  This table covers
+gid 5, 6, 7, 51, and 53 stations that are absent from `trawl_and_seine_net_v`
+(the two tables are mutually exclusive — zero station_id overlaps):
+
+```{r}
+#| label: tbl-dredge
+#| tbl-cap: "dredge_v gear code coverage"
+dredge <- read_parquet("data-raw/data-dump/adb/dredge_v.parquet")
+station_v |>
+  filter(station_id %in% dredge$station_id) |>
+  count(gear_no) |>
+  knitr::kable(col.names = c("gid", "n"))
+```
+
+### Wrong gear code filters
+
+The `traps` block filtered on `gid %in% c(18, 39)` — codes from the legacy
+`afli` schema.  In the `adb` system trap records carry gid 51 (`trap_v` holds
+428 such stations).  The `static` block covered only gid 1–3; gid codes 11,
+25, 29, 91, and 92 also appear in `line_and_net_v` and were excluded.
+
+### `difftime(t2, t2, ...)` typo
+
+The `mobile` block computed `towtime = as.numeric(difftime(t2, t2, units = "mins"))`,
+yielding zero for every record.  The fix is `difftime(t2, t1, ...)`.
+
+### Dead code
+
+`dragnot_varpa <- read_parquet(...)` at the top of the effort section in
+`01_fs_afladagbok_convert.R` read the file into a variable that was never
+used.  The `knitr::kable()` diagnostic call that reported the bug was also
+removed.
+
+---
+
+## Year-by-year comparison
+
+### `adb` schema
+
+```{r}
+#| label: tbl-adb-years
+#| tbl-cap: "adb station counts by year: brute-force reference vs fixed script"
+library(nanoparquet)
+library(tidyverse)
+
+bind_rows(
+  read_parquet("data/adb/station_new-brute-force.parquet") |>
+    mutate(year = year(date), source = "brute-force"),
+  read_parquet("data/adb/station.parquet") |>
+    mutate(year = year(date), source = "fixed")
+) |>
+  count(year, source) |>
+  filter(between(year, 2019, 2026)) |>
+  tidyr::spread(source, n, fill = 0) |>
+  mutate(diff = `fixed` - `brute-force`) |>
+  knitr::kable()
+```
+
+### `fs_afladagbok` schema
+
+```{r}
+#| label: tbl-fs-years
+#| tbl-cap: "fs_afladagbok station counts by year after fix"
+read_parquet("data/fs_afladagbok/station.parquet") |>
+  mutate(year = year(date)) |>
+  count(year) |>
+  filter(between(year, 2016, 2026)) |>
+  knitr::kable()
+```
