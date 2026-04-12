@@ -95,7 +95,7 @@ and are converted to decimal degrees via `geo::geoconvert.1()` (multiplied by
 | `gildra.parquet` | Trap records |
 | `hringn.parquet` | Purse seine / ring net records |
 | `rafr_stofn.parquet` | Header table for automatic logger events; links to `rafr_sjalfvirkir_maelar` |
-| `rafr_sjalfvirkir_maelar.parquet` | Automatic logger positions (**affected by wacky coordinate error** — see below) |
+| `rafr_sjalfvirkir_maelar.parquet` | Automatic logger positions (**affected by wacky coordinate error** — see `WACKY_COORDS.md`) |
 
 **Raw column vocabulary (afli system → unified name):**
 
@@ -108,8 +108,8 @@ and are converted to decimal degrees via `geo::geoconvert.1()` (multiplied by
 | `tegund` | `sid` | Species code |
 | `magn` | `catch` | Catch amount |
 | `timi` | `timi` | Timestamp (logger positions) |
-| `lengd` | `lengd` | Longitude — logger positions (wacky error) |
-| `breidd` | `breidd` | Latitude — logger positions (wacky error) |
+| `lengd` | `lengd` | Longitude — logger positions (affected by wacky error; see `WACKY_COORDS.md`) |
+| `breidd` | `breidd` | Latitude — logger positions (affected by wacky error; see `WACKY_COORDS.md`) |
 | `skip_hradi` | `skip_hradi` | Instantaneous vessel speed (knots) |
 | `skip_stefna` | `skip_stefna` | Instantaneous vessel heading (degrees) |
 
@@ -299,74 +299,45 @@ are retained (orphan catch records are dropped via `inner_join`).
 | `catch` | dbl | Total catch (summed within `.sid × sid`) |
 | `source` | chr | Schema tag |
 
-## Coordinate conversion — the wacky error
-
-A systematic encoding error affects `lengd` and `breidd` in
-`rafr_sjalfvirkir_maelar.parquet` (and potentially other tables that passed
-through the same conversion). Positions were stored as integers in **DDMMmm**
-format (degrees–minutes–decimal-minutes, last two digits = 1/100th of a minute,
-range 00–99) but were incorrectly converted to decimal degrees by treating the
-last two digits as *seconds* (valid range 00–59). This misplaces reported
-positions by up to ~0.4 NM when the decimal-minute value was ≥ 60.
-
-Note: coordinate recovery is a side-product of the main merge effort but is
-documented here because it is a significant quality issue.
-
-### Confidence classification
-
-Every affected record can be assigned one of three recovery levels:
-
-| Level | Criterion | Positional uncertainty | Typical share |
-|---|---|---|---|
-| **High** | Extracted `ss` ∈ [40, 59] for **both** coords | Exact | ~4% |
-| **Partial** | Extracted `ss` ∈ [40, 59] for **one** coord | ~300–740 m in one direction | ~33% |
-| **Low** | Extracted `ss` ∈ [0, 39]  for **both** coords | ~300–740 m in both directions | ~63% |
-
-### Recovery functions
-
-All utility functions are defined in `wacky_recovery.qmd` (Functions section).
-Key entry points:
-
-```r
-# Add recovery columns and confidence classification
-dat <- add_recovery_cols(dat)   # adds ss_lon, ss_lat, confidence, lon_A/B, lat_A/B
-
-# Resolve ambiguous records (greedy forward pass)
-dat |>
-  arrange(visir, timi) |>
-  group_by(visir) |>
-  group_modify(~ resolve_track(.x)) |>    # adds lon_r, lat_r
-  ungroup()
-
-# Resolve with forward-backward smoother (preferred for long tracks)
-dat |>
-  arrange(visir, timi) |>
-  group_by(visir) |>
-  group_modify(~ resolve_track_fb(.x)) |>  # adds lon_fb, lat_fb
-  ungroup()
-```
-
-The smoother uses `skip_hradi` and `skip_stefna` (speed and heading) to
-dead-reckon the expected next position and select between candidate A and B.
-Median turn-angle improvement: **33–48%** by gear type (independent validation).
-
-### DuckDB equivalent
-
-A SQL macro for the *correct* conversion is registered in
-`scripts/01_logbooks-old_convert.R`:
-
-```sql
-CREATE OR REPLACE MACRO rb_convert_DMdM(x) AS (
-  SIGN(x) * (ABS(x) + (200.0/3.0) *
-    ((ABS(x)/100.0) - TRUNC(ABS(x)/10000.0) * 100.0)) / 10000.0
-);
-```
-
 ## Utility functions (`R/`)
 
 | File | Contents |
 |---|---|
 | `R/translate_name.R` | `translate_name()` — renames columns using a dictionary; works on both data frames and lazy duckdb connections |
+
+## Pipeline orchestration (`targets`)
+
+The pipeline is managed with the `targets` package. The entry point is
+`_targets.R` in the project root.
+
+**Key commands (run in the R console):**
+
+| Command | Effect |
+|---|---|
+| `targets::tar_make()` | Run everything that is out of date |
+| `targets::tar_make("target_name")` | Run one target + its dependencies |
+| `targets::tar_visnetwork()` | Interactive dependency graph in the Viewer |
+| `targets::tar_outdated()` | List targets that would re-run |
+| `targets::tar_read("target_name")` | Retrieve a completed target's value |
+| `targets::tar_destroy()` | Wipe the cache (`_targets/`) and start fresh |
+
+**Target inventory (12 targets, 4 tiers):**
+
+| Tier | Target | Format | Purpose |
+|---|---|---|---|
+| 0a | `script_dict`, `script_gear`, `script_afli`, `script_fs`, `script_adb`, `script_merge` | `"file"` | Track script files — edits trigger downstream re-runs |
+| 0b | `dictionary_file` | `"file"` | Runs `data-raw/DATASET_dictionary.R` → `data/dictionary.parquet` |
+| 0b | `gear_mapping_file` | `"file"` | Runs `data-raw/DATASET_gear-codes.R` → `data/gear/gear_mapping.parquet` |
+| 1 | `afli_files` | `"file"` | Runs `scripts/01_afli_convert.R` → `data/afli/*.parquet` |
+| 1 | `fs_files` | `"file"` | Runs `scripts/01_fs_afladagbok_convert.R` → `data/fs_afladagbok/*.parquet` |
+| 1 | `adb_files` | `"file"` | Runs `scripts/01_adb_convert.R` → `data/adb/*.parquet` |
+| 2 | `merged_files` | `"file"` | Runs `scripts/02_merge.R` → `data/merged/*.parquet` |
+
+The three Tier-1 targets have no dependency on each other and can run in
+parallel with `tar_make(workers = N)` (requires a parallel backend such as
+`crew`).
+
+The `_targets/` cache folder is gitignored.
 
 ## Coding conventions
 
@@ -466,8 +437,9 @@ mapping exists.
 
 ## Known data quality issues
 
-1. **Wacky coordinates** in `rafr_sjalfvirkir_maelar.parquet` — see above.
-   Recovery method is documented and implemented; production application pending.
+1. **Wacky coordinates** in `rafr_sjalfvirkir_maelar.parquet` — systematic
+   DDMMmm→decimal-degrees encoding error; recovery method documented in
+   `WACKY_COORDS.md` and `wacky_recovery.qmd`; production application pending.
 2. **Erroneous timestamps** — year-1899 and year-2090s entries exist in
    `rafr_sjalfvirkir_maelar.parquet`; likely default/null date values from Oracle.
 3. **Convert script station loss** — `01_adb_convert.R`,
@@ -527,22 +499,14 @@ mapping exists.
   26,361) `adb`-only stations have no new-schema `gid` after the old→new
   gear mapping lookup in `02_merge.R`. Identify which old `gid_old` codes
   are unmapped and decide whether to extend `gear_mapping` or accept the gap.
-- [ ] **Apply wacky coordinate recovery** to the full
-  `rafr_sjalfvirkir_maelar` dataset (2008–2020); write corrected parquet to
-  `data/`; notify `../fishydata`.
+- [ ] **Apply wacky coordinate recovery** — see `WACKY_COORDS.md` for details
+  and outstanding sub-tasks.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` —
   classify `ws_veidi` rows for Flotvarpa (gid 9) by `uppruni` to separate
   decimal-degree sources from DMS sources before conversion.
 - [ ] **Resolve longline effort unit** — confirm whether `fj_kroka` is total
   hook count or lines×hooks; align `effort_unit` label (`"hooks"` vs
   `"hook-nights"`) and reconcile with the afli formula (`onglar × bjod`).
-- [ ] **Clarify `logbook/` coordinate exposure** — determine which coordinate
-  columns in the experimental `logbook/` schema (if any) are affected by the
-  same wacky conversion as `afli` logger data. The `fs_afladagbok` DMS/DDM
-  ambiguity is a separate issue already handled in the convert script.
-- [ ] **Performance: `resolve_track_fb()`** — inner loop is pure R; consider
-  Rcpp or `furrr::future_map()` for the full ~20M record dataset once recovery
-  is applied to production data.
 
 ### Completed
 
@@ -573,3 +537,6 @@ mapping exists.
   implements afli > fs_afladagbok > adb priority; `gid` for `adb`-only stations
   derived via old→new `gear_mapping` lookup at merge time. Output: 7,286,576
   stations, 1,838,263 trips, 16,874,343 catch records.
+- [x] **`_targets.R` created (2026-04-12)** — `targets` pipeline entry point;
+  12 targets across 4 tiers; script files tracked as file targets so edits
+  propagate automatically; Tier-1 conversions are parallelisable.
