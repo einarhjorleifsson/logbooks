@@ -1,3 +1,5 @@
+# messy flow - should be reconstructed
+# note, run on hafdruna / hafbjarmi, the files cp
 library(mar)
 library(tidyverse)
 library(duckdbfs)
@@ -7,7 +9,7 @@ dump <- function(overview, owner) {
   for(i in 1:nrow(overview)) {
     tbl <- paste0(overview$owner[i], ".", overview$name[i])
     print(tbl)
-    out <- paste0("data-raw/data-dump/",
+    out <- paste0("tmp_agf/",
                   owner,
                   "/",
                   overview$name[i], ".parquet")
@@ -45,23 +47,25 @@ get_views <- function(owner) {
     rename(name = view_name)
 }
 
-owners <- c("adb", "afli", "fs_afladagbok", "logbook")
+owners <- c("agf")
 for(i in 1:length(owners)) {
   print(owners[i])
-  if(owners[i] == "logbook") con <- connect_mar(dbname = "BRIM")
   # tables
   ov <- owners[i] |> get_tables()
-  ov |> write_dataset(paste0("data-raw/data-dump/", owners[i], "/_overview_tables.parquet"))
-  ov <- ov[ov$name != "takt_json_form", ]
+  ov |> write_dataset(paste0("tmp_agf/", owners[i], "_overview_tables.parquet"))
   ov |> dump(owners[i])
   # views
   ov <- owners[i] |> get_views()
   if(nrow(ov) > 0) {
-    ov <- ov[ov$name != "rafr_mottaka_view", ]
-    ov <- ov[ov$name != "urv_raekja", ]
-    ov |> write_dataset(paste0("data-raw/data-dump/", owners[i], "/_overview_views.parquet"))
+    ov <- ov[ov$name != "aflagrunnur_sec_v", ]
+    ov <- ov[ov$name != "aflagrunnur_th_igildi_v", ]
+    ov |> write_dataset(paste0("tmp_agf/", owners[i], "_overview_views.parquet"))
     ov |> dump(owners[i])
   }
 }
 
 
+
+tbl_mar(con, "kvoti.lods_oslaegt") |>
+  collect() |>
+  write_parquet("tmp_agf/kvoti_lods_oslaegt.parquet")

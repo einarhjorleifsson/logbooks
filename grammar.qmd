@@ -1,0 +1,939 @@
+---
+title: "A grammar of sea-going observational data"
+number-sections: true
+toc: true
+toc-location: right
+toc-depth: 3
+bibliography: references.bib
+---
+
+@yang2025 propose a grammar of data analysis in which any analysis can be expressed as computing
+*metrics* over *dimensions* — a layer of abstraction above the grammar of data manipulation
+(dplyr, pandas) that brings the vocabulary of the code into alignment with the intent of the
+analyst. Their framework presupposes, however, that the underlying data is already consistently
+structured: that the "dimensions" the analyst has in mind correspond to coherently named and keyed
+columns in the tables being queried. This document proposes the complementary layer below: a
+grammar of *data representation* for vessel-based sea-going observations. Before any metric can be
+computed over any dimension, the raw records from dozens of national and institutional schemas must
+be mapped onto a common hierarchy — voyages, discrete operations, specific observational acts,
+individual measurements — connected by stable keys and a controlled column vocabulary. Getting
+that representation right is the precondition for the clean metric-over-dimension analysis that
+@yang2025 envision.
+
+## Motivation
+
+In 2010, Hadley Wickham formalised the **grammar of graphics** in R through
+ggplot2 [@wickham2010]. The central insight was not aesthetic but structural:
+any statistical graphic, regardless of type or complexity, can be decomposed
+into a small set of composable primitives — data, aesthetic mappings, geometric
+objects, scales, facets, and a coordinate system. Give those primitives
+consistent names and rules, and you can describe every plot in the same
+language.
+
+Sea-going observational data has an analogous problem. Every country, every
+regulatory body, every research institute that sends vessels to sea has its own
+schema. Column names differ (`visir`, `station_id`, `VE_REF`, `LE_CDAT`,
+`stnno`, `haul_id`). Coordinate encodings differ: DDMMss integers, DDM floats,
+decimal degrees, ICES rectangles (~50 km × ~50 km). Gear and instrument
+vocabularies differ. Time representations differ. Yet the underlying reality
+being recorded is always the same: *a vessel leaves port, makes a series of
+observations at sea — deploying gear, lowering instruments, or simply steaming
+on transect — and returns to port.*
+
+But naming inconsistency is only half the problem. The deeper issue is one of
+**resolution**: some systems record individual operations with precise GPS
+positions and event-level timestamps; others aggregate many such operations
+into a single daily entry attributed to an area the size of a county. The same
+four-level hierarchy underlies every system — the difference is how finely each
+level is resolved.
+
+The grammar tradition has since broadened: Wickham's dplyr formalised a
+grammar of *data manipulation* [@wickham2010], and @yang2025 propose a
+grammar of *data analysis* built on top of it. Each layer assumes the one
+below is sound. This document addresses the foundational layer — a grammar
+of *data representation* — for vessel-based sea-going observations.
+
+This document proposes a minimal, unambiguous table structure — a grammar —
+that can represent any vessel-based sea-going observation, regardless of
+whether the vessel is a commercial fishing boat, a fisheries research vessel,
+or an oceanographic survey ship, and regardless of its country of origin or
+degree of spatial and temporal resolution. Commercial fisheries logbooks
+(Icelandic and EU/ICES formats) and scientific survey data serve as the initial
+test cases. The grammar is intentionally broader: it is designed to accommodate
+hydrographic casts, acoustic transects, biological sampling, and continuous
+underway recording alongside fishing operations, all within the same structural
+framework.
+
+Commercial fishing logbooks are currently the most thoroughly documented sample
+type in this document, reflecting the project's immediate focus. Documentation
+for other observation types will be added as the work develops.
+
+## The hierarchy
+
+Vessel-based sea-going activity is naturally hierarchical. Four levels cover
+essentially all cases:
+
+```
+Trip
+ └── Station  (one or more per trip)
+      └── Sample  (one or more per station)
+           └── Observation / Measurement  (one or more per sample)
+```
+
+The relationship is strictly one-to-many at each level: one trip may contain
+many stations; one station may contain many samples; one sample may contain
+many individual observations or measurements. Foreign keys flow downward only;
+each child record carries the identifier of its parent.
+
+The same structure accommodates commercial fishing vessels and scientific
+research vessels equally. Both consist of a vessel making a voyage during which
+operations are carried out at discrete locations. The grammar accommodates both;
+the difference lies in the *type and richness* of the sample and measurement
+tables — not in the structure of the trip and station tables.
+
+
+
+### What counts as a station?
+
+A station is any location or interval during a trip where the vessel engages in
+activity other than normal transit — gear deployment, scientific sampling, or
+any other deliberate operation. Transit legs between stations are not stations.
+This definition is deliberately broad: a CTD cast, a plankton net tow, or a
+hydroacoustic transect all qualify as stations just as a trawl haul does.
+
+### Multiple sample types at one station
+
+A single station can yield several distinct samples collected simultaneously or
+in close succession. In scientific survey work this is the norm rather than the
+exception:
+
+```
+Station (trawl haul at 64°N, 25°W)
+ ├── Fishing sample      → catch measurements (species, weight, length)
+ ├── Hydrographic sample → CTD cast (depth, temperature, salinity profile)
+ └── Plankton sample     → net tow measurements
+```
+
+In commercial logbooks the sample layer is usually implicit — one fishing event
+produces one block of catch records — but the grammar accommodates richer
+nesting without changes to the schema. The key point is that multiple sample
+types share a single station record; they do not each create a new station.
+
+### Trip-level continuous data
+
+Some observations cannot be assigned to any specific station because they are
+recorded continuously throughout the voyage: GPS/AIS position streams, VMS
+pings, continuous plankton recorder (CPR) data, underway sea-surface
+temperature and salinity, echograms. Historically these records were keyed by
+vessel identifier and timestamp; any station link was inferred afterward from
+temporal overlap.
+
+These form a **parallel data stream** rather than a level in the hierarchy.
+They are not stations (no discrete deployment or retrieval), and they are not
+samples in the hierarchical sense (no parent station). In practice they should
+be stored in a separate table keyed on `(vid, timestamp)` and joined to `.tid`
+(and, where unambiguous, to `.sid`) after the fact. Continuous underway data
+that spans multiple stations — or the entire trip — cannot be assigned to any
+single station without loss of information.
+
+### What belongs at station level versus sample level
+
+The station record captures the *envelope* of an entire event: where and when
+the vessel was occupied (`s1`/`s2`, `lon1`/`lat1`, `lon2`/`lat2`, `z1`/`z2`).
+The sample record captures a specific observational act nested inside that
+envelope — with its own instrument, method, and event-level timestamps
+(`t0`–`t3`).
+
+A practical rule: if a value characterises the station as a whole, it belongs
+in the station table; if it belongs to a specific measurement act with its own
+sub-structure, it belongs in a sample record.
+
+Surface temperature illustrates the boundary case. A single temperature reading
+logged automatically at the moment a station begins is a station-level attribute
+(one value, no sub-structure). A full CTD profile taken at the same time is a
+sample (many depth-profiled values). If the same environmental variable is
+recorded by two instruments simultaneously — or if the recording instrument is
+not always known — the instrument identity should be preserved as a column in
+the sample record (e.g. `instrument_id`) so that conflicting readings can be
+distinguished rather than silently overwritten.
+
+Time is similarly a boundary case. The station outer bounds `s1`/`s2` define
+the temporal envelope of the entire station. The event-level timestamps
+`t0`–`t3` are sample-level: they belong to the specific observational act
+(fishing operation, CTD cast, etc.) nested within the station. Any
+finer-grained timing — sub-tow position fixes, sample-by-sample clock readings
+— belongs at the measurement level. Conflating levels leads to ambiguity when
+a station contains multiple concurrent samples with their own timing.
+
+
+
+## Level 1 — Trip
+
+A trip is the unit of a single voyage: departure from a port or base,
+operations at sea, and return. For commercial vessels it corresponds to an
+administrative event — a vessel licence period, a landing declaration, a crew
+manifest. For research vessels it corresponds to a cruise or survey leg. The
+structure is the same regardless of vessel type.
+
+**Essential columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `.tid` | int / chr | Trip identifier (primary key) |
+| `vid` | int / chr | Vessel identifier |
+| `T1` | datetime | Departure time |
+| `hid1` | int / chr | Departure harbour |
+| `T2` | datetime | Landing / return time |
+| `hid2` | int / chr | Landing harbour |
+
+The `.tid` and `.sid` identifiers use a dot prefix throughout this project to
+signal that they are *synthetic* keys — either assigned by the source system
+or derived during processing — as opposed to natural domain keys like `vid`
+(vessel number) or `sid` (species code), which have a stable external
+definition.
+
+Time columns follow a three-level naming convention that mirrors the hierarchy:
+
+| Level | Columns | Meaning |
+|---|---|---|
+| Trip | `T1`, `T2` | Departure and landing times (uppercase T, numbered) |
+| Station | `s1`, `s2` | Outer time bounds of the station — derived as the minimum and maximum across all sample-level times at that station (lowercase s, numbered) |
+| Sample | `t0`, `t1`, `t2`, `t3` | Individual event timestamps within a fishing operation or other sample (lowercase t, zero-indexed) |
+
+In the common commercial case where each station contains exactly one fishing
+sample, `s1 = t0` and `s2 = t3` (or whichever of `t0`–`t3` are populated),
+and the station outer bounds are redundant. They become necessary — and
+independently meaningful — when a station contains several concurrent sample
+types (e.g. a trawl haul and a CTD cast), each with its own time window.
+
+A trip record can legitimately exist with no associated station records: a
+vessel may turn back due to weather, move between harbours in ballast, or
+simply have no detailed operation records in the source data. The grammar
+handles this naturally — the station table is a child of the trip table, not
+the other way around.
+
+In some source systems no explicit trip table exists and must be derived.
+In the Icelandic `afli` legacy schema, trips are reconstructed by grouping
+stations on the same vessel sharing the same anticipated landing date and
+harbour, with `.tid` assigned as the minimum `.sid` within each group.
+In the EU eflalo format, the trip is likewise embedded in the logbook record
+(`FT_DDAT`/`FT_DTIME`, `FT_LDAT`/`FT_LTIME`) and must be extracted and
+de-duplicated: every row belonging to the same trip carries the same departure
+and landing times, so `.tid` is derived via `consecutive_id()` on those columns.
+
+## Level 2 — Station
+
+A station is any discrete operation at a location during a trip: gear
+deployment and retrieval, scientific sampling, or any other deliberate
+non-transit activity. A station may contain multiple simultaneous samples of
+different types (catch, hydrographic, biological); the station record holds
+the envelope metadata common to all of them — principally *where* and *when*
+the vessel was occupied, not *what* it was doing there.
+
+**Essential columns:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `.sid` | int | Station identifier (primary key) |
+| `.tid` | int / chr | Parent trip (foreign key) |
+| `date` | date | Station date (administrative anchor; derived from `s1` when not recorded directly) |
+| `s1` | datetime | Station outer start — earliest time recorded across all samples at this station |
+| `s2` | datetime | Station outer end — latest time recorded across all samples at this station |
+| `lon1`, `lat1` | dbl | Station spatial start (decimal degrees) |
+| `lon2`, `lat2` | dbl | Station spatial end (decimal degrees) |
+| `z1`, `z2` | dbl | Station depth bounds (m) |
+| `sq`, `ssq` | int | Statistical square / sub-square |
+
+`s1` and `s2` are derived outer bounds whose exact values depend on which
+sample-level timestamps are populated. In the common single-fishing-sample
+case `s1` maps to whichever of `t0`–`t3` is earliest (typically `t0` for
+static gear, `t1` for mobile), and `s2` to whichever is latest.
+
+The spatial columns `lon1`/`lat1`, `lon2`/`lat2`, `z1`/`z2`, and `sq`/`ssq`
+play an analogous role to `s1`/`s2`: they describe the station's spatial and
+depth envelope — the bounding positions and depths across all samples at that
+station, conditioned on `s1` and `s2`. This is discussed further in the
+subsection below.
+
+### The spatial envelope of a station
+
+The position and depth columns on the station record are derived spatial
+bounds in exactly the same sense as `s1`/`s2` are derived temporal bounds.
+The underlying recorded positions belong to the fishing sample (or other
+sample type): tow start and end coordinates, set and haul positions, depth at
+gear-set and gear-haul. The station table carries these as envelope values —
+the spatial extremes across all samples at the station, conditioned on
+`s1`/`s2`.
+
+The pairing convention (`lon1`/`lat1` at `s1`, `lon2`/`lat2` at `s2`) makes
+the spatial columns time-ordered rather than simply min/max bounded, which
+preserves the tow track direction for mobile gears. For depth, a vessel
+fishing over a slope can have `z1` (depth at tow start) and `z2` (depth at
+tow end) differ substantially; the pair records that range rather than
+collapsing it to a single value.
+
+`sq` and `ssq` (ICES statistical square and sub-square) are derived from
+position, typically from `lon1`/`lat1` or a midpoint; they serve as coarse
+spatial keys for aggregation and are station-level attributes because they
+summarise the station's spatial location regardless of which sample provided
+the underlying coordinates.
+
+## Level 3 — Sample
+
+A sample represents a discrete observational event *within* a station. A
+station may contain several samples of different types recorded simultaneously
+or in close succession; each is a separate row in the sample table linked by
+`.sid`.
+
+**Minimal columns for a sample table:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `.smid` | int | Sample identifier (primary key) |
+| `.sid` | int | Parent station (foreign key) |
+| `sample_type` | chr | Kind of observation (`"fishing"`, `"ctd"`, `"logger"`, …) |
+| `t0` | datetime | Sample start — earliest event in this sample |
+| `t1` | datetime | Second event (gear-class dependent; see below) |
+| `t2` | datetime | Third event (gear-class dependent) |
+| `t3` | datetime | Sample end — latest event in this sample |
+
+### The fishing sample *(first detailed sample type)*
+
+Of the many possible sample types — fishing operations, hydrographic casts,
+biological net tows, acoustic transects, sediment grabs — the fishing sample
+is the first to be fully documented here, reflecting the current project focus
+on commercial fisheries logbooks. The structural principles established below
+(the `t0`–`t3` event sequence, gear-specific effort, the commercial collapse
+pattern) serve as a template; documentation for other sample types will follow
+in later revisions of this document.
+
+A fishing sample is a single gear deployment from which catch is recorded. Its
+`t0`–`t3` timestamps and their gear-class-specific meanings are described in
+the subsection below; the full column set is:
+
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `gid` | int / chr | Gear type code |
+| `t0`, `t1`, `t2`, `t3` | datetime | Event timestamps (deployment → fishing start → fishing end → retrieval) |
+| `lon1`, `lat1` | dbl | Position at `t1` (fishing start / tow start) |
+| `lon2`, `lat2` | dbl | Position at `t2` (fishing end / tow end) |
+| `z1`, `z2` | dbl | Depth at fishing start and end (m) |
+| `effort_count` | dbl | Count component of effort — gear-type-specific (hooks, nets, jigs, trap units; simultaneous gear count for mobile, default 1) |
+| `effort_duration` | dbl | Time component of effort — in the natural unit implied by `effort_unit` (derived from capped `duration_m`) |
+| `effort_unit` | chr | Unit of the product (e.g. `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"jig-hours"`, `"trap-hours"`, `"setting"`) |
+| `effort` | dbl | Standardised effort: `effort_count × effort_duration` |
+| `towtime` | dbl | Tow duration (minutes; mobile gear) |
+| `gear_width` | dbl | Effective gear width (m; mobile gear) |
+
+Gear type (`gid`) is a fishing-sample attribute because it characterises the
+specific operation performed, not the station as a location. At a station
+where a trawl haul and a CTD cast are made simultaneously, the CTD sample has
+no gear code; only the fishing sample does. Effort and its unit are likewise
+properties of the operation: they are calculated from the fishing sample's own
+timestamps (`t2 − t1`), hook counts, net counts, or trap units — none of
+which are station-envelope quantities.
+
+Gear-specific auxiliary quantities (number of hooks, nets, traps, sweeps
+length, etc.) belong here too. In the source systems they appear in dedicated
+sub-tables (`toga`, `lineha`, `ws_dragnot_varpa`, `ws_linanethandf`, etc.)
+that are normalised for the relational database. In the unified schema they
+are flattened as nullable columns on the fishing sample record: populated for
+the relevant gear class, `NA` elsewhere.
+
+**Commercial logbook collapse.** In commercial logbook data there is typically
+exactly one fishing sample per station, so the sample level is not represented
+as a separate table in practice. All fishing-sample columns — `gid`, `t0`–`t3`,
+position, depth, `effort_count`, `effort_duration`, `effort_unit`, `effort`, `towtime`, `gear_width` — appear
+directly on the station record as denormalised columns. The grammar locates
+them at the sample level regardless of where they are physically stored;
+downstream code should treat them as sample attributes even when they live in
+the station table.
+
+### The time structure of a fishing sample
+
+A fishing operation is a continuous physical process — gear enters the water,
+fish are caught, gear is retrieved — yet it is recorded as a *discrete* event
+with a small number of timestamps. Which timestamps are meaningful, and which
+can be non-overlapping across operations on the same vessel, depends entirely
+on the gear class.
+
+#### Mobile gear
+
+For mobile gears (bottom trawl, midwater trawl, seine, dredge), one operation
+must end before the next can begin: the vessel must retrieve its gear before
+redeploying. Operations are therefore strictly sequential. The full time
+structure of a single operation has four events:
+
+| Event | Logbook column | Recorded? |
+|---|---|---|
+| Gear deployment starts (gear enters water) | — | No |
+| **Fishing starts** (gear on bottom / tow begins) | **`t1`** | Yes |
+| **Fishing ends** (gear lifted / tow ends) | **`t2`** | Yes |
+| Gear fully retrieved (gear back on deck) | — | No |
+
+The deployment and retrieval intervals bracketing `t1` and `t2` are short
+relative to tow duration and are not recorded in practice. What matters for
+analysis is `t2 − t1`: the tow time, which is the primary effort unit for
+mobile gears and the basis for swept-area calculations.
+
+The key non-overlap constraint is simple: no two operations on the same vessel
+can have overlapping `[t1, t2]` intervals. A vessel can only tow one set of
+gear at a time, so any two operations where `t1`/`t2` windows overlap is a
+data error.
+
+#### Static gear
+
+Static gears (longline, gillnet, trap) operate fundamentally differently. Once
+deployed, gear fishes autonomously for hours or days while the vessel is free
+to move elsewhere. A vessel can therefore have several sets of gear in the
+water simultaneously — gear A soaking while gear B is being deployed, gear C
+being retrieved while gear A continues to soak. The outer `[t0, t2]` windows
+of concurrent operations legitimately overlap.
+
+The full time structure of a single static-gear operation has five events
+(using the grammar labels introduced in the next subsection):
+
+| Event | Grammar label | Recorded? |
+|---|---|---|
+| **Gear deployment starts** (first hook / net in water) | **`t0`** | Yes |
+| Gear deployment ends (last hook / net in water) | `t1` | Rarely |
+| [Soak period — gear fishing autonomously] | — | — |
+| **Gear retrieval starts** (first hook / net hauled) | **`t2`** | Yes |
+| **Gear retrieval ends** (last hook / net on board) | **`t3`** | Yes |
+
+The deployment-end timestamp `t1` is almost never recorded; the deployment
+phase is treated as instantaneous in most logbook systems. This is an
+acknowledged gap: for a vessel setting 2,000 hooks at 1 knot, the deployment
+alone may take two hours, and the unrecorded `t1` can differ substantially
+from `t0`.
+
+The non-overlap constraints for static gear are more subtle than for mobile
+gear. Two constraints hold that cannot be violated physically:
+
+- **Deployment windows** `[t0, t1]` cannot overlap across concurrent
+  operations — a vessel can only be in one place setting gear at a time.
+- **Retrieval windows** `[t2, t3]` cannot overlap across concurrent
+  operations — a vessel can only be hauling one set of gear at a time.
+
+But the *outer* interval `[t0, t3]` of two operations on the same vessel *can*
+overlap legitimately: deploying a new longline while an older one soaks is
+normal practice. The timeline below illustrates a typical two-operation
+sequence:
+
+```
+Operation A:  t0_A ── t1_A · · · · · · · · · t2_A ── t3_A
+Operation B:               t0_B ── t1_B · · · · · · · · · t2_B ── t3_B
+```
+
+Here operation B's deployment begins after A's deployment ends but before A's
+retrieval begins. The outer `[t0, t3]` windows overlap; the `[t0, t1]` and
+`[t2, t3]` windows do not.
+
+This has a direct consequence for data quality checking. A check that flags
+any two operations on the same vessel with overlapping `[t0, t3]` intervals
+will produce false positives for static gear. The correct checks are:
+
+- `t0 < t2 < t3` must hold within every individual operation (with `t1`
+  between `t0` and `t2` when recorded).
+- No two operations on the same vessel share an overlapping `[t2, t3]`
+  retrieval window.
+- No two operations on the same vessel share an overlapping `[t0, t1]`
+  deployment window — but since `t1` is rarely recorded, this check is
+  limited in practice to detecting identical `t0` timestamps.
+
+#### A unified time convention: t0 – t3
+
+The preceding discussion used labels that differ between gear classes —
+`t1`/`t2` for mobile, `t0`/`t2`/`t3` for static. A grammar should not require
+consulting the gear type before interpreting a column name. The four physical
+events of any fishing operation map cleanly onto a single sequence:
+
+| Label | Event | Mobile gear | Static gear |
+|---|---|---|---|
+| `t0` | Gear deployment starts | Warp / net enters water | First hook / net enters water |
+| `t1` | Gear deployment ends — fishing begins | Gear on bottom, tow begins | Last hook / net in water, soaking begins |
+| `t2` | Fishing ends — gear retrieval starts | Gear lifted off bottom | First hook / net hauled |
+| `t3` | Gear retrieval ends | Gear back on deck | Last hook / net on board |
+
+Under this convention the effort quantity of primary interest — active fishing
+time — is consistently `t2 − t1` regardless of gear class. `t1 − t0` is always
+deployment duration; `t3 − t2` is always retrieval duration.
+
+The non-overlap constraints from the previous sections state uniformly for all
+gear types: `[t0, t1]` windows cannot overlap across concurrent operations;
+`[t2, t3]` windows cannot overlap; `[t0, t3]` outer windows can overlap for
+static gear only.
+
+##### What is typically recorded
+
+No data system records all four events for all gear types. The practical
+coverage is:
+
+| Label | Mobile gear | Static gear |
+|---|---|---|
+| `t0` | Rarely | Usually |
+| `t1` | Usually | Rarely |
+| `t2` | Usually | Usually |
+| `t3` | Rarely | Usually |
+
+For mobile gear the effort calculation depends on `t2 − t1` (tow time), so
+`t1` and `t2` are the primary events; `t0` and `t3` bracket the tow but are
+not needed for effort. For static gear, soak time (`t2 − t1`) is the
+theoretically correct effort measure, but since `t1` (deployment end) is
+rarely recorded, soak time is commonly approximated as `t2 − t0` — the
+interval from first-hook-in to first-hook-hauled — which overestimates true
+soak time by the deployment duration.
+
+##### Resetting the Icelandic vocabulary
+
+The Icelandic logbook systems (`afli`, `fs_afladagbok`) use a `t0`/`t1`/`t2`
+convention that predates this grammar. The mapping to grammar labels is:
+
+| Icelandic label | Mobile gear meaning | Grammar label | Static gear meaning | Grammar label |
+|---|---|---|---|---|
+| `t0` | — (not used) | — | Deployment starts | `t0` ✓ |
+| `t1` | Tow starts | `t1` ✓ | Retrieval starts | `t2` ✗ |
+| `t2` | Tow ends | `t2` ✓ | Retrieval ends | `t3` ✗ |
+
+For mobile gear the Icelandic labels happen to coincide with the grammar.
+For static gear they do not: the Icelandic `t1` means retrieval starts
+(grammar `t2`), and the Icelandic `t2` means retrieval ends (grammar `t3`).
+The event grammar calls `t1` (deployment ends) has no Icelandic label because
+it is not recorded.
+
+A reset to grammar conventions would require, **for static gear only**:
+
+- Rename current `t1` → `t2` (retrieval starts)
+- Rename current `t2` → `t3` (retrieval ends)
+- Add `t1` as a new column for deployment end — currently unrecorded and
+  therefore `NA` throughout, but named consistently with mobile gear
+
+No changes are needed for mobile gear columns. After the reset, the time
+columns carry the same meaning across all gear types: a reader can interpret
+`t0`–`t3` without consulting `gid`.
+
+### Other sample types
+
+A sample-level table becomes necessary the moment more than one type of
+observation is made at the same station:
+
+- A scientific survey tow may record both a catch sample (species composition
+  and weight) and a series of hydrographic casts (CTD profiles) at the same
+  station position. These are two distinct samples with their own `t0`/`t3`
+  bounds.
+- Continuous electronic logger data — position, speed, heading, net opening,
+  depth — recorded during a tow constitute a third type of sample: a time
+  series of sensor readings rather than a single aggregate measurement.
+
+The `afli` legacy system implicitly recognises this: `stofn.parquet` is the
+station table, while `rafr_sjalfvirkir_maelar.parquet` is a separate table of
+automatic logger readings linked to the same station via `visir` (`.sid`). The
+logger table is a sample in the grammar's sense — a different observation type,
+at a finer temporal resolution, recorded alongside the main fishing operation.
+
+## Level 4 — Observation / Measurement
+
+At the lowest level sit the individual observations or measurements produced
+by a sample. What these look like depends entirely on the sample type:
+
+- For a **fishing sample**: one row per species per sample (or per station when
+  the sample level is collapsed), recording species identity and catch weight.
+- For a **hydrographic sample**: one row per depth bin, recording temperature,
+  salinity, oxygen, etc.
+- For a **biological sample**: one row per individual organism, recording
+  length, weight, age, sex.
+- For a **logger sample**: one row per timestamp, recording position, speed,
+  depth, net opening, etc.
+
+The grammar does not prescribe the internal structure of measurement tables
+beyond requiring a foreign key to the parent sample (`.smid`) or, when the
+sample level is collapsed, to the parent station (`.sid`).
+
+**Catch table (commercial fishing):**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `.sid` | int | Parent station (foreign key; or `.smid` if sample table is present) |
+| `sid` | int / chr | Species identifier |
+| `catch` | dbl | Landed weight (kg) |
+
+Note the deliberate naming distinction: `.sid` (dot-prefixed) is the station
+synthetic key; `sid` (no dot) is the species code — a stable external
+identifier from the species vocabulary. The two happen to share the stem "sid"
+for different reasons, and the dot prefix is the only disambiguation needed.
+
+## Landings — a parallel data stream *(commercial fisheries)*
+
+The following section is specific to commercial fisheries; it has no direct
+equivalent for scientific survey voyages.
+
+Landings records are not a level within the observation hierarchy; they are a
+parallel stream collected independently of the logbook by a third party — a
+harbour authority, fish buyer, or national statistics body. Their natural keys
+are the same that anchor a trip: vessel (`vid`), landing date/time (`T2`), and
+landing harbour (`hid2`). A synthetic `.lid` can be assigned after
+de-duplication, but the link to a specific trip is made via those natural keys,
+not via `.tid`.
+
+```
+Trip  ──(vid, T2, hid2)──→  Landing (.lid)
+ └── Station
+      └── Catch       ←──── should sum to ────→  Landing catch (by species)
+```
+
+The catch table is the skipper's self-reported account of what was caught at
+each station; the landing record is the buyer's or authority's account of what
+arrived at the dock. In an ideal system `sum(catch)` across all stations of a
+trip equals the landed quantity for each species. Discrepancies arise from
+at-sea discards, mis-reporting, species misidentification, or processing
+losses. Tracking the difference is a data quality diagnostic: the grammar keeps
+the two streams structurally separate precisely so the discrepancy is
+measurable.
+
+**Minimal columns for a landings table:**
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `.lid` | int / chr | Landing identifier (primary key) |
+| `vid` | int / chr | Vessel identifier |
+| `T2` | datetime | Landing date/time |
+| `hid2` | int / chr | Landing harbour |
+| `sid` | int / chr | Species identifier |
+| `catch` | dbl | Landed weight (kg) |
+
+Landings records sometimes carry limited spatial information — a statistical
+rectangle or fishing area declared on the landing form — but this is far
+coarser than the GPS positions on a logbook station. When linkage to a trip
+succeeds, the richer station-level spatial information is preferred; the
+landing-form area serves only as a fallback.
+
+## The column vocabulary
+
+The grammar is only as useful as its naming conventions are consistent. The
+table below lists the core column names; collectively they form a controlled
+vocabulary that any downstream script can rely on without inspecting the source
+schema.
+
+| Name | Level | Meaning |
+|------|-------|---------|
+| `.tid` | Trip | Synthetic trip key |
+| `.sid` | Station | Synthetic station key |
+| `vid` | Trip | Vessel identifier |
+| `cid` | Trip | Country identifier |
+| `T1`, `T2` | Trip | Departure / landing time (uppercase = trip level) |
+| `hid1`, `hid2` | Trip | Departure / landing harbour |
+| `n_crew` | Trip | Crew count |
+| `date` | Station | Station date (administrative anchor) |
+| `s1`, `s2` | Station | Outer time bounds (derived — min/max of sample times) |
+| `lon1`, `lat1` | Station | Spatial start (envelope — position at `s1`) |
+| `lon2`, `lat2` | Station | Spatial end (envelope — position at `s2`) |
+| `z1`, `z2` | Station | Depth bounds (envelope — depth at `s1`/`s2`) |
+| `sq`, `ssq` | Station | Statistical square / sub-square (derived from position) |
+| `gid` | (Fishing) Sample | Gear type code |
+| `t0`, `t1`, `t2`, `t3` | (Fishing) Sample | Deployment start / fishing start / fishing end / retrieval end |
+| `effort_count` | (Fishing) Sample | Count component of effort (hooks, nets, jigs, trap units, or simultaneous gear count for mobile) |
+| `effort_duration` | (Fishing) Sample | Time component of effort (in the natural unit for each gear type; derived from capped `duration_m`) |
+| `effort_unit` | (Fishing) Sample | Unit of the product (e.g. `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"setting"`) |
+| `effort` | (Fishing) Sample | Standardised effort: `effort_count × effort_duration` |
+| `towtime` | (Fishing) Sample | Tow duration (minutes) |
+| `gear_width` | (Fishing) Sample | Effective gear width (m) |
+| `sid` | Catch | Species identifier |
+| `catch` | Catch | Catch weight (kg) |
+
+Three naming conventions are worth making explicit:
+
+- **Dot-prefix** on `.tid`, `.sid`, `.smid` marks synthetic or derived keys,
+  not natural domain identifiers. Columns generated inside processing functions
+  — and not present in the raw input — also carry a dot prefix (e.g. `.intv`,
+  `.checks`).
+- **Three-level time convention** makes the temporal hierarchy unambiguous at
+  a glance: uppercase `T1`/`T2` are trip bounds; lowercase `s1`/`s2` are
+  station outer bounds (derived from sample times); lowercase `t0`–`t3` are
+  sample-level event timestamps (defined in detail for fishing samples; the
+  same sequence applies to other sample types as appropriate).
+- **Numeric suffix** on paired columns (`lon1`/`lon2`, `lat1`/`lat2`,
+  `z1`/`z2`, `hid1`/`hid2`) consistently encodes start (1) and end (2),
+  regardless of which physical direction "start" implies for a given gear type.
+
+## Resolution and the hierarchy
+
+Not all data systems resolve the hierarchy to the same depth. The grammar
+describes the ideal; real-world data falls somewhere along a resolution
+continuum from individual fishing operation to broad annual totals. The table
+below places the main data types encountered in practice on that continuum:
+
+| Resolution level | Typical grouping keys | Effort recorded | Spatial precision | Example source |
+|---|---|---|---|---|
+| **Station** | `.sid`, `s1`/`s2`, GPS position | Per operation | Metres | Icelandic electronic logbooks |
+| **Event** | trip × gear × day × rectangle | Implied by trip duration | ICES rectangle (~50 km) | EU eflalo |
+| **Monthly aggregate** | year, month, vessel, gear, harbour, rectangle, species | Hours / sets per month | ICES rectangle | Pre-electronic Icelandic records |
+| **Annual aggregate** | year, species, area | None or coarse | Large statistical area | Pre-logbook statistics |
+
+### Station level
+
+The station-level case is discussed throughout this document. Each row
+represents a single, discrete operation — a gear deployment, an instrument
+cast, an acoustic transect leg. Position and timing are recorded at operation
+resolution; effort is recorded for fishing operations specifically.
+
+### Event level (EU eflalo)
+
+What appears in an eflalo row as a single observation — a gear deployed on a
+given date in a given rectangle — may in reality represent several distinct
+fishing operations. A trawler working the same grounds all day in the same ICES
+rectangle produces one eflalo row regardless of whether it made two hauls or
+ten. The station level is simply not recorded; only the aggregate is.
+
+This is not a deficiency unique to EU reporting: many national logbook systems
+operate at the same resolution, and even some Icelandic vessels in the early
+`afli` period reported only date and rectangle without timestamps or GPS. The
+eflalo format merely formalises this aggregate reporting as a standard.
+
+The wide catch format used in eflalo is a separate structural choice with
+practical consequences: pivoting from `LE_KG_<SP>` columns to long format (one
+row per species) is a required preprocessing step before any species-level
+analysis, and the number of species columns varies across submissions and years,
+making automated processing fragile.
+
+### Monthly and annual aggregates
+
+Historical data is often available only in aggregated form — the original
+station-level records were never digitised, or have been lost. A typical
+pre-electronic Icelandic record might contain: year, month, vessel, gear type,
+landing harbour, ICES rectangle, species, total catch, and total effort
+(expressed as hours towed, or number of sets). This is structurally richer than
+eflalo — effort and catch are both present — but finer temporal or spatial
+resolution is unrecoverable.
+
+At even coarser resolution, effort disappears entirely: records contain only
+year, species, and a large geographic area (e.g. Iceland total, or North
+Atlantic FAO area). These are the earliest layers of the historical record.
+
+### Joint analysis across resolution levels
+
+A researcher studying long-run trends in catch rates or gear efficiency needs
+to work with station-level data for recent decades alongside monthly aggregates
+for historical years. The four-level hierarchy is defined at station resolution;
+it cannot directly accommodate monthly aggregates without blurring the
+distinction between a row that represents one tow and a row that represents
+a month's worth of tows.
+
+Two approaches are available:
+
+**Option A — Separate tables, harmonised by a view.** Keep the station table at
+its native resolution and store historical aggregates in a separate
+`aggregate.parquet` table keyed on (year, month, vessel, gear, harbour,
+rectangle, species). For joint analysis, a query projects both onto a common
+schema — typically the monthly aggregate resolution — by grouping station
+records before stacking:
+
+```r
+# Approximate sketch — not production code
+station |>
+  mutate(year = year(date), month = month(date)) |>
+  summarise(
+    catch = sum(catch), effort = sum(effort),
+    .by = c(vid, year, month, gid, hid2, sq, sid)
+  ) |>
+  bind_rows(aggregate)
+```
+
+This keeps the raw tables unambiguous and lets the analyst choose the
+aggregation level. It is the preferred approach when the station table is the
+primary data source.
+
+**Option B — Synthetic stations and trips for aggregate records.** Each row in
+an aggregate table can be treated as a pseudo-station: a synthetic `.sid` is
+assigned; `lon1`/`lat1` are set to the ICES rectangle centroid; `t1` is the
+first day of the month and `t2` the last (or both are left `NA`); effort is
+taken directly from the recorded total. A synthetic `.tid` is likewise
+assigned — one per (vessel, month) combination when vessel is known, one per
+aggregate row otherwise. This preserves the single-table grammar and allows
+downstream scripts to operate on any source without special-casing, at the
+cost of introducing fictitious precision that must be clearly flagged.
+
+The two options are not mutually exclusive. A practical workflow might store
+historical aggregates in their native form (Option A) and materialise synthetic
+stations only when feeding a downstream analysis tool that expects a station
+table.
+
+### `station_type` — making provenance explicit
+
+Regardless of which option is chosen, the station table should carry a
+`station_type` column that records the provenance and resolution of each row:
+
+| Value | Meaning |
+|---|---|
+| `"operation"` | Genuine individual station-level operation (logbook station, survey cast, etc.) |
+| `"event"` | Aggregate: trip × gear × day × rectangle (EU eflalo style) |
+| `"monthly_aggregate"` | Aggregate over one calendar month |
+| `"annual_aggregate"` | Aggregate over one calendar year |
+| `"reconstructed"` | Station derived from VMS / AIS ping classification |
+
+Any analysis sensitive to the distinction — swept-area calculations, temporal
+overlap checks, tow-time distributions — should filter or weight by
+`station_type`. Analyses that are resolution-agnostic (e.g. total catch by
+species and year) can ignore it.
+
+The `station_type` column also serves the purpose proposed in "Scope and
+extensions": flagging reconstructed stations derived from VMS / AIS pings
+alongside the other provenance classes.
+
+## Reconstructing station resolution from position data
+
+When logbook data only records events (trip × gear × day × rectangle), station-
+level spatial and temporal resolution can be partially recovered by linking
+logbook records to high-frequency vessel position data — either VMS (Vessel
+Monitoring System) pings, transmitted at 2-hour intervals, or AIS
+(Automatic Identification System) pings, available at much higher frequency
+(minutes or seconds for many vessels).
+
+The reconstruction proceeds in two steps:
+
+**Step 1 — Activity classification.** Not every ping represents active fishing;
+vessels also steam between grounds, enter harbour, drift at anchor, and shelter
+from weather. Fishing activity is inferred from vessel speed: a trawler moving
+at 2–4 knots is likely towing gear; the same vessel at 10 knots is steaming.
+Speed thresholds by gear type are estimated from the bimodal speed distribution
+of fishing versus steaming, typically fit using a Gaussian mixture model
+[@woillez2016]. Pings classified as "fishing" become implicit station records
+at the temporal and spatial resolution of the position data.
+
+**Step 2 — Catch distribution.** Logbook catch, recorded at the event level
+(trip × gear × day × rectangle), must be distributed across the individual
+fishing pings that fall within that event. The simplest approach assigns equal
+catch weight to each ping; more sophisticated methods weight by swept area,
+gear width, or tow duration.
+
+This two-step procedure is the foundation of the ICES VMS and logbook data-call
+workflow, implemented in the `osfd` R package [@osfd]. The key structural point
+is that the procedure is a *consequence* of the station level being absent from
+the logbook data: were individual fishing operations recorded with timestamps
+and GPS positions — as they are in the Icelandic high-resolution system — no
+catch distribution step would be needed. The catch would already be attributed
+to a precise time and place.
+
+The high-resolution Icelandic data illustrates what the EU data is trying to
+approximate. A bottom trawler with full electronic logbook coverage has `t1`,
+`t2`, `lon1`/`lat1`, `lon2`/`lat2` for every haul: the station table is
+complete. The same vessel operating under EU reporting requirements would
+produce a single eflalo row for the day, and a reconstructed station table
+derived from VMS pings would be the best available substitute. The grammar
+is the same; the provenance of the station records differs.
+
+VMS and AIS pings themselves form a natural sample-level table in the grammar:
+they are repeated positional observations associated with a station (fishing
+event), at finer temporal resolution than the logbook entry. In the `osfd`
+workflow, processed pings carry `.pid` (ping identifier), `vid`, `time`, `lon`,
+`lat`, `speed`, and `heading` — a table that maps directly onto the sample
+level of the hierarchy, with the classified fishing pings serving as implicit
+station boundaries.
+
+## How data systems map onto the grammar
+
+| | `afli` | `fs_afladagbok` | `adb` | EU eflalo |
+|-|--------|-----------------|-------|-----------|
+| **Trip key** | Derived: `min(.sid)` per `(vid, T2, hid2)` | `ws_veidiferd.id` | `trip_v.trip_id` | Derived: `consecutive_id()` on `FT_DDAT`/`FT_LDAT` |
+| **Station key** | `stofn.visir` | `ws_veidi.id` | `station_v.station_id` | `.eid` (row number — not a true station) |
+| **Station concept** | Individual fishing operation | Individual fishing operation | Individual fishing operation | Aggregate: trip × gear × day × rectangle |
+| **Gear code** | Legacy integer (old) | New integer (canonical) | New integer (derived) | ICES metier string (e.g. `OTB`, `LLS`) |
+| **Spatial resolution** | GPS (metres) | GPS (metres) | GPS (variable quality) | ICES rectangle (~50 km) |
+| **Temporal resolution** | Minutes (on-bottom clock) | Minutes (electronic timestamps) | Minutes (electronic timestamps) | Day (`LE_CDAT`); rarely `t1`/`t2` |
+| **Catch format** | Long | Long | Long | Wide (`LE_KG_<SP>` columns) |
+
+The gear code unification for the Icelandic schemas is handled by
+`gear_mapping` (`data/gear/gear_mapping.parquet`), which maps the legacy many-
+to-one from old codes to new. For the EU eflalo system, gear is expressed as
+an ICES metier string (`LE_GEAR`, `LE_MET`) that encodes gear type, target
+species, and mesh size, and maps onto the same ICES controlled vocabulary via
+`sfdSAR::predict_gear_width()` for swept-area calculations.
+
+### Raw column mapping by grammar level
+
+The table below is generated from `data/dictionary.parquet` and shows, for
+every unified column name, which raw source column it originates from in each
+of the three Icelandic schemas. Grammar level annotations (`trip`, `station`,
+`sample`, `catch`) are currently assigned for the `afli` schema; the same
+levels apply to the corresponding rows in the other two schemas wherever the
+unified name matches.
+
+For `afli`, the source table is shown in parentheses because several unified
+names are populated from more than one raw table (e.g. `temp1_surface` appears
+in both `toga` and `lineha`). A dash (—) means the variable is absent or not
+yet mapped in that schema.
+
+```{r}
+#| label: tbl-column-mapping
+#| tbl-cap: "Raw-to-unified column mapping by grammar level across the three Icelandic logbook schemas. `afli` entries show `raw_name (source_table)`."
+library(dplyr)
+library(nanoparquet)
+library(knitr)
+
+dict <- read_parquet("data/dictionary.parquet")
+
+# Grammar level comes from afli annotations
+afli_levels <- dict |>
+  filter(schema == "afli", !is.na(level)) |>
+  select(clean, level) |>
+  distinct()
+
+# Build per-schema display strings; include source table for afli
+raw_names <- dict |>
+  filter(schema %in% c("afli", "fs_afladagbok", "adb")) |>
+  mutate(display = if_else(
+    schema == "afli",
+    paste0(messy, " (", table, ")"),
+    messy
+  )) |>
+  summarise(display = paste(unique(display), collapse = ", "),
+            .by = c(clean, schema)) |>
+  tidyr::pivot_wider(names_from = schema, values_from = display,
+                     values_fill = "—")
+
+afli_levels |>
+  left_join(raw_names, by = "clean") |>
+  arrange(factor(level, levels = c("trip", "station", "sample", "catch")),
+          clean) |>
+  select(level, clean, afli, fs_afladagbok, adb) |>
+  rename(Level = level,
+         `Unified` = clean,
+         `afli raw (table)` = afli,
+         `fs_afladagbok raw` = fs_afladagbok,
+         `adb raw` = adb) |>
+  kable()
+```
+
+## Scope and extensions
+
+The grammar described here is intentionally minimal. The four levels and the
+column vocabulary above are sufficient to represent commercial logbook data
+across all gear types and reporting resolutions encountered in practice — from
+the full-detail Icelandic system to the aggregate EU eflalo format. The grammar
+also accommodates scientific survey data with minor additions at the sample and
+measurement levels (sample type, individual fish measurements, hydrographic
+observations).
+
+What the grammar does *not* prescribe is the encoding of controlled
+vocabularies: which codes are valid gear types, which harbour identifiers are
+valid, which species codes are in use. Those are lookup tables —
+`gear_mapping`, the harbour register, the species list, the ICES metier
+vocabulary — that sit alongside the grammar tables but are not part of the
+core hierarchy. Keeping them separate means the grammar itself is stable even
+as vocabularies evolve.
+
+Two extensions are of immediate practical interest:
+
+1. **Sample table for logger data.** The automatic logger records in `afli`
+   (`rafr_sjalfvirkir_maelar`) currently exist as a parallel table linked by
+   `.sid` but without a formal sample identifier. Introducing `.smid` would
+   allow multiple logger sessions per station to be cleanly represented and
+   would make the hierarchy fully consistent. The same structure would cover
+   VMS / AIS ping tables once they are linked to individual station records.
+
+2. **`station_type` provenance flag.** A `station_type` column on the station
+   table records whether a row represents a genuine individual fishing operation,
+   an aggregate logbook event, a historically aggregated record, or a station
+   reconstructed from VMS / AIS pings. The full vocabulary and its role in
+   joint analysis across resolution levels is described in the
+   [Resolution and the hierarchy](#resolution-and-the-hierarchy) section.

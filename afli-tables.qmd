@@ -1,0 +1,551 @@
+---
+title: "The `afli` Oracle database — table inventory and schema evolution"
+author: "Einar Hjörleifsson"
+date: today
+---
+
+```{r setup}
+#| include: false
+library(arrow)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+```
+
+## Overview
+
+The `afli` Oracle schema is Fiskistofa's primary operational catch-and-effort
+database. Its 96 tables span five decades of Icelandic fishing records, and its
+structure reflects the successive layers of technology through which logbook
+data have been collected: paper forms, early electronic entry, XML-based digital
+submissions, and on-board automatic loggers.
+
+The parquet dump in `data-raw/data-dump/afli/` is a static snapshot exported
+via `data-raw/data-dump/oracle_dump.R`. Metadata tables `_overview_tables.parquet`
+and `_overview_fields.parquet` carry Oracle table comments and column
+documentation where available.
+
+The tables can be grouped into six functional families, described in the
+sections below.
+
+---
+
+## Schema evolution and consolidation {#sec-eras}
+
+The naming convention, temporal coverage, and `visir` sign distribution of the
+tables reveal how the database evolved — and how it is structured as a
+consolidated whole.
+
+### The `visir` key space
+
+`visir` (Icelandic: pointer / index) is the universal station key throughout
+the schema. Its sign distinguishes provenance:
+
+| `visir` sign | Origin |
+|---|---|
+| **Positive** | Paper-era record (transcribed from physical logbook) |
+| **Negative** | Electronic-era record (loaded from XML digital submission) |
+
+### Master tables vs staging tables
+
+The central finding from examining the `visir` distributions is that `stofn`,
+`afli`, `toga`, `lineha`, `hringn`, and `gildra` are **consolidated master
+tables** — they contain records from both eras:
+
+| Master table | Positive visir (paper) | Negative visir (electronic) | Electronic share |
+|---|---|---|---|
+| `stofn` | 5,610,300 | 1,275,274 | 18.5% |
+| `afli` | 11,610,187 | 4,064,218 | 26.0% |
+| `toga` | 4,447,596 | 1,029,820 | 18.8% |
+| `lineha` | 1,056,760 | 236,254 | 18.3% |
+
+Cross-matching confirms that ~96% of `rafr_stofn` rows reappear in `stofn`
+(negative visir), and similarly for `rafr_toga` (~97%) and `rafr_lineha`
+(~97%). The `rafr_*` tables are therefore the **import staging layer** —
+records are loaded from XML into `rafr_stofn` (and its gear subtables) and
+simultaneously written to the master `stofn` (and its gear subtables).
+
+The distinction matters for analysis: the master tables (`stofn` / `afli` /
+`toga` …) give the most complete single view spanning all eras, while the
+`rafr_*` staging tables are the only place to find the XML back-links
+(`xml_sending_visir`, `xml_faerslu_visir`) needed to trace a record back to
+the original submission.
+
+### Chronology — three phases
+
+**Phase 1: Paper logbooks (~1950s–2007).** The core tables predate any
+electronic system. Data were transcribed by inspectors from physical logbooks
+submitted at landing. Station positions recorded as DDMM integers — when
+recorded at all; early records have a high rate of missing coordinates.
+`stofn.vedags` (fishing date, paper era only) shows continuous data from the
+1970s onward, with scattered records back to 1950. In `stofn`, positive-visir
+records continue through 2022 (declining in volume after ~2014 as digital
+submissions displaced paper).
+
+**Phase 2: Early electronic submissions (~2003–2007).** A small number of
+vessels began submitting XML logbooks from ~2003. The `rafr_stofn.hledsla_dags`
+column (the Oracle import timestamp) shows the volume clearly:
+
+| Year | Stations loaded |
+|---|---|
+| 2003 | 408 |
+| 2004 | 2,282 |
+| 2005–2007 | ~7,000–10,000 / yr |
+| **2008** | **43,263** ← mandatory rollout |
+
+**Phase 3: Mandatory electronic logbooks (~2008–2020).** The 2008 inflection
+in `hledsla_dags` marks a regulatory change requiring large vessels to submit
+digital logbooks. Annual volumes stabilise at ~80,000–100,000 stations/year
+through 2019. From 2020 onwards the `afli`/`rafr_*` series tapers as the
+newer `fs_afladagbok` and `adb` systems take over reception of fresh
+submissions.
+
+The `afladagb_skil` / `afladagb_skil_linur` compliance tables were added in
+**January 2014** (per Oracle comment) to formally track whether vessels met
+their monthly submission obligations. Physical logbook delivery is recorded in
+`afladagbok_afhending` for vessels that did not participate digitally.
+
+---
+
+## Family 1 — Core fishing records {#sec-core}
+
+### `stofn` — fishing stations (consolidated master)
+
+The central fact table. One row per fishing operation (set, tow, or haul).
+
+```{r}
+#| label: tbl-stofn
+#| tbl-cap: "Key columns of `stofn`."
+tribble(
+  ~Column,       ~Type,    ~Description,
+  "visir",       "int",    "Unique station key",
+  "skipnr",      "int",    "Vessel registration number",
+  "veidarf",     "int",    "Gear type code (old vocabulary)",
+  "ahofn",       "int",    "Crew size (Oracle: *Fjöldi manna í áhöfn skipsins*)",
+  "vedags",      "date",   "Fishing date",
+  "breidd",      "int",    "Start latitude — DDMM integer (e.g. 6534 = 65°34′N)",
+  "lengd",       "int",    "Start longitude — DDMM integer (stored unsigned; West assumed for Iceland)",
+  "breidd_lok",  "int",    "End latitude — DDMM integer",
+  "lengd_lok",   "int",    "End longitude — DDMM integer",
+  "reitur",      "int",    "Statistical square (1°×1°)",
+  "smareitur",   "int",    "Statistical sub-square (0.5°×0.5°)",
+  "dypi",        "int",    "Depth (m)",
+  "ldags",       "date",   "Landing date",
+  "lhofn",       "int",    "Landing harbour"
+) |> knitr::kable()
+```
+
+`stofn` has **6,885,574** rows. It is the consolidated master station table
+spanning all collection eras: positive `visir` = paper-era records (1950s–2022,
+bulk in 1970s–2010s); negative `visir` = electronic-era records (2003–2024,
+~96% overlap with `rafr_stofn`). The `visir` primary key is shared by all
+gear-specific subtables in both eras. Coordinates are DDMM integers and must be
+converted with `geo::geoconvert.1()` (multiply by 100 before passing in; negate
+longitude for West hemisphere). Missing coordinates are common in older records;
+`pos_lon` / `pos_lat` columns provide decimal-degree fallbacks where the Oracle
+import process was able to derive them from statistical squares.
+
+### `afli` — catch records (consolidated master)
+
+One row per species per station. Oracle comment: *"Sameiginleg fyrir öll
+veiðarfæri"* (common to all gear types). Like `stofn`, this is a consolidated
+master table: 11.6M positive-visir (paper-era) rows plus 4.1M negative-visir
+(electronic-era) rows, the latter overlapping with `rafr_afli`. Columns:
+`visir` (→ `stofn`), `tegund` (species code), `magn` (catch weight), `afli`
+(catch in standard units), `astand` (condition: S = poor, L = good).
+
+**15,674,405** catch rows total; `visir` is the join key to `stofn`.
+
+### Gear subtables
+
+Each links to `stofn` via `visir`. Together they cover all gear classes.
+
+| Table | Rows | Gear | Key effort columns |
+|---|---|---|---|
+| `toga` | 5,477,416 | Mobile (trawl, seine) | `togtimi` (min), `grandarar` (sweep width m), `hoflina` (head-line m), `moskvi` (mesh mm) |
+| `lineha` | 1,293,014 | Longline / gillnet | `onglar` (hooks/set), `bjod` (sets), `dregin` (nets hauled), `naetur` (net-nights), `faeri` (jigs), `klst` (hours) |
+| `hringn` | 107,778 | Purse seine / ring-net | `l_notar` (net length m), `d_notar` (net depth m), `kast_nr` (cast number) |
+| `gildra` | 5,269 | Traps | `gildrur` (trap count), `klst` (soak hours) |
+
+### Ancillary station tables
+
+| Table | Rows | Description |
+|---|---|---|
+| `beita` | 153,536 | Bait used in longline operations — species (`tegund`), kg |
+| `medafli` | 2,708 | Incidental catch of marine mammals and birds |
+| `soknartegund` | 2,291,420 | Gear-type breakdown per station; `visir` + `tegund` + `hlutfall` (proportion) |
+
+---
+
+## Family 2 — Electronic logbook staging tables (`rafr_*`) {#sec-rafr}
+
+### `rafr_stofn` — electronic station import table
+
+The staging table for XML-submitted fishing stations. **1,149,278** rows; valid
+dates (from `hledsla_dags`, the Oracle import timestamp) 2003–2020 with the
+bulk arriving after the 2008 mandatory rollout. Approximately 96.5% of these
+rows are also present in `stofn` (negative visir). The principal reason to use
+`rafr_stofn` rather than `stofn` directly is its XML traceability columns,
+which `stofn` does not carry. Has the same core columns as `stofn` plus:
+
+| Column | Description |
+|---|---|
+| `xml_faerslu_visir` | Links to the individual FAERSLA within the XML submission |
+| `xml_sending_visir` | Links to `afladagb_xml_mottaka.id` |
+| `xml_londun_sending_visir` | Links to the XML landing-confirmation sending |
+| `hledsla_dags` | Date the record was loaded into Oracle from XML |
+| `eytt` | Deletion flag (0 = live, 1 = deleted) |
+
+Coordinates follow the same DDMM integer convention as `stofn`.
+
+### Electronic gear staging subtables
+
+These mirror the paper-era gear subtables and feed into the same master tables
+via the negative-visir consolidation. ~97% of `rafr_toga` and `rafr_lineha`
+rows reappear in `toga` and `lineha` respectively.
+
+| Staging table | Rows | Master table | Gear |
+|---|---|---|---|
+| `rafr_toga` | 931,260 | `toga` | Mobile gear |
+| `rafr_lineha` | 209,257 | `lineha` | Longline / gillnet |
+| `rafr_hringn` | 8,673 | `hringn` | Purse seine |
+| `rafr_beita` | 136,067 | `beita` | Bait |
+| `rafr_medafli` | 1,807 | `medafli` | Marine mammal / bird bycatch |
+| `rafr_afli` | 3,625,502 | `afli` | Catch by species |
+| `rafr_soknartegund` | 1,994,085 | `soknartegund` | Gear-type breakdown |
+
+### `rafr_stofn_*` — station detail subtables
+
+A family of ~15 small tables provides additional electronic-era station detail,
+each linked to `rafr_stofn` by `visir`. Most have fewer than 100 rows in the
+dump, suggesting they record rare events or optional supplementary fields.
+
+| Table | Rows | Description |
+|---|---|---|
+| `rafr_stofn_fisktegundir` | — | Species recorded for a station |
+| `rafr_stofn_fisktegundir_sleppt` | — | Species released / discarded |
+| `rafr_stofn_veidarf` | 13 | Gear used per station |
+| `rafr_stofn_beita` / `_beita_t` | — / 67 | Bait detail |
+| `rafr_stofn_botngerd` | 15 | Bottom type observations |
+| `rafr_stofn_sjolag` | 10 | Sea conditions |
+| `rafr_stofn_hofn` | 91 | Harbour detail |
+| `rafr_stofn_fotreipi` | 7 | Foot-rope detail |
+| `rafr_stofn_gerd_kroka` | 8 | Hook type |
+| `rafr_stofn_gerd_poka` | 7 | Codend type |
+| `rafr_stofn_skiljugerd` | 6 | Sorting grid |
+| `rafr_stofn_spendyr_fuglar` | 68 | Marine mammal / bird detail |
+| `rafr_stofn_aths_skipstjora` | 45 | Skipper's remarks |
+| `rafr_stofn_aths_eftirlit_t` | 13 | Inspector's remarks |
+
+---
+
+## Family 3 — Automatic logger tracks {#sec-logger}
+
+Vessels equipped with automatic position loggers record position, speed and
+heading at regular intervals (typically every 10 minutes) throughout a trip.
+These data arrive in the XML submission inside `SJALFVIRKIR_MAELAR/LOG` elements
+and are stored in two related tables.
+
+### `sjalfvirkir_maelar` vs `rafr_sjalfvirkir_maelar`
+
+Both tables carry all-negative `visir` values and **identical coordinate
+values** for overlapping records (685,656 shared `visir`s confirmed by exact
+diff). They differ in temporal coverage and column set:
+
+| | `sjalfvirkir_maelar` | `rafr_sjalfvirkir_maelar` |
+|---|---|---|
+| Rows | 28,234,223 | 23,610,639 |
+| Valid `timi` range | 2000–2024 | 2000–2020 |
+| Extra columns | `botndypi`, `hofudlinudypi`, `botnhiti`, `hofudlinuhiti`, `vindhradi`, `vindstefna` | fewer |
+
+`sjalfvirkir_maelar` is the later, larger extract — it extends four more years
+(2021–2024) and carries additional sensor columns (wind speed/direction, column
+temperatures). `rafr_sjalfvirkir_maelar` appears to be an earlier Oracle
+extraction that was superseded. **Use `sjalfvirkir_maelar` as the primary
+source** for logger track analysis; `rafr_sjalfvirkir_maelar` adds nothing
+not already present in the wider table.
+
+Both tables link to `rafr_stofn` via `visir` (negative values throughout).
+Unlike the gear subtables, there is no positive-visir master-table equivalent
+for logger data — `sjalfvirkir_maelar` is itself the master.
+
+### Wacky coordinate error {#sec-wacky}
+
+Positions in both logger tables are stored as decimal-degree floats, but the
+values are incorrect for approximately 96% of records. The error is not a
+simple encoding mistake that can be exactly reversed.
+
+**Root cause.** On-board GPS loggers encode positions as DDMMmm integers (degrees,
+minutes, hundredths-of-a-minute; e.g. `633367` = 63°33.67′N). The logbook
+software (Trackwell / SeaData) converted these to decimal degrees by treating
+the last two digits as *seconds* (valid range 0–59) rather than hundredths of a
+minute (range 0–99). When the original hundredths value was ≥ 60, the software
+rolled the minute counter forward and subtracted 60 from the remainder, shifting
+the reported position by a fixed `1/150° ≈ 300–740 m`.
+
+**Evidence that the error is sender-side.** The same XML submission that
+contains wacky decimal logger positions also contains DDMM integer coordinates
+in the `STOFN/STADSETNING` elements (vessel position at start/end of tow,
+entered manually by the skipper). These integer values were stored verbatim in
+`rafr_stofn.breidd` / `rafr_stofn.lengd` without any conversion by the
+recipient. The logger positions, by contrast, arrive in the XML already as
+decimal-degree floats — the erroneous conversion was applied by the logbook
+software before transmission. The recipient stored both verbatim; the error
+originated upstream.
+
+```{r logger-coord-illustration}
+#| echo: false
+#| label: tbl-wacky-example
+#| tbl-cap: "A single SJALFVIRKIR_MAELAR/LOG entry from submission id 52066. The stored decimal values are the result of the DDMMmm → DMS conversion error applied by the logbook software. The STOFN/STADSETNING entry from the same FAERSLA is stored as an integer in rafr_stofn."
+tribble(
+  ~Source,          ~`XML node`,                     ~`Stored value`,  ~Format,
+  "Logger position", "SJALFVIRKIR_MAELAR/LOG/STADSETNING", "BREIDD='63.3366667'  LENGD='19.4022222'", "Wacky decimal",
+  "Station position", "STOFN/STADSETNING",           "BREIDD='6320'  LENGD='1928'",   "DDMM integer"
+) |> knitr::kable()
+```
+
+**Recovery.** From any wacky stored value $w$ the original DDMMmm components
+can be extracted:
+
+$$dd = \lfloor |w| \rfloor, \quad
+mm = \lfloor (|w| - dd) \times 60 \rfloor, \quad
+ss = \operatorname{round}\bigl(((|w| - dd) \times 60 - mm) \times 60\bigr)$$
+
+where $ss$ is the original hundredths-of-a-minute that was mis-handled. The
+ambiguity arises because $ss \in [0, 39]$ is consistent with two interpretations:
+the original hundredths could be $ss$ (non-wacky) or $ss + 60$ (wacky with
+rollover). Only when $ss \in [40, 59]$ is the solution unique (~4% of records).
+A greedy forward-backward smoother using recorded speed and heading resolves
+most ambiguous records with a residual positional uncertainty of ~300–740 m.
+Full methodology is in `wacky_recovery.qmd`.
+
+**An alternative to algorithmic recovery** is to obtain corrected data directly
+from the logbook software vendors (Trackwell / SeaData), who presumably retain
+the original DDMMmm integer values before conversion. This would yield exact
+positions for all records without reliance on the dead-reckoning smoother.
+
+---
+
+## Family 4 — XML submission pipeline {#sec-xml}
+
+```
+Vessel (logbook software)
+  │
+  │  XML via email / HTTPS
+  ▼
+afladagb_xml_mottaka (raw XML archive)
+  │                     │
+  │  Oracle import       │  run log
+  ▼                     ▼
+rafr_stofn          rafr_hledsla_log
+rafr_afli           (import log)
+rafr_toga …
+  │
+  │  monthly compliance check
+  ▼
+afladagb_skil
+afladagb_skil_linur (compliance tracking)
+```
+
+### `afladagb_xml_mottaka` — raw XML archive
+
+**483,738** rows; one row per submission. The `sending` column holds the
+complete XML document as a character string. Metadata columns:
+
+| Column | Description |
+|---|---|
+| `id` | Submission row id |
+| `skip_nr` | Vessel number |
+| `fra` / `til` | Submission period (start / end) |
+| `londun_faersla` | Type flag: `"F"` = fishing, `"L"` = landing |
+| `hugbunadur` | Logbook software name and version (58 distinct values; predominantly Trackwell variants) |
+| `ret_val` | Processing return code |
+
+Earliest valid `fra` timestamps are ~2004–2005; the series extends to 2021-05.
+Rows with `fra = 0000-12-30` are Oracle null-date artefacts.
+
+### `afladagb_schema` — XML schema versions
+
+37 rows; stores the XML schema definitions used to validate submissions over
+time. Links submissions to their schema version.
+
+### `afladagb_skil` / `afladagb_skil_linur` — compliance records
+
+Introduced January 2014 (per Oracle comment). `afladagb_skil` (9,961 rows) is
+the master table — one row per vessel per submission period. `afladagb_skil_linur`
+(46,561 rows) is the detail table tracking each fishing month within a period
+(`man`, `ar`, `skil` = submission status). Both carry `snn`/`snt`/`sbn`/`sbt`
+audit columns (stamped/approved by / timestamps).
+
+### `afladagbok_afhending` — physical logbook delivery
+
+801 rows. Records the handing-over of paper logbooks: vessel, logbook number
+range, date, recipient name and address. Relevant for vessels that did not
+participate in the digital system. A `tegund_bokar` (book type) field
+distinguishes log types.
+
+### `rafr_hledsla_log` / `rafr_hledsla_log_runs`
+
+6,595,396 log rows across 456 import runs. Each run processes a batch of XML
+submissions; log entries carry `visir`, `skip_nr`, severity (`INFO` / `ERROR`),
+and Icelandic-language message text. Useful for diagnosing import failures;
+only 15 rows relate to station-loading errors in the full archive.
+
+### `mottaka` — early catch-receipt register
+
+509,774 rows. Predates the XML system; records vessel-level catches by gear and
+fishing period (`fra`, `til`). The `stada` column encodes processing status.
+Temporal coverage begins ~1999–2000. Likely used as a cross-check against
+reported logbook catch before the digital system was mature.
+
+---
+
+## Family 5 — Reference tables {#sec-reference}
+
+### Species and gear
+
+| Table | Rows | Description |
+|---|---|---|
+| `fiskar` | 68 | Species code → Icelandic name; `er_yfirflokkur` flags aggregate codes |
+| `rafr_oll_stofngogn` | 408 | Lookup for electronic station data types (e.g. "Lína", "Net") |
+| `rafr_stofngogn` | 13 | Station data category labels |
+
+### Statistical areas
+
+| Table | Rows | Description |
+|---|---|---|
+| `skikar` | 1,211 | Statistical area (skiki) codes and names |
+| `skil` | 12,987 | Legacy paper submission records; includes `man`/`ar` (month/year) |
+| `faer_reitur` | 37 | Statistical square lookup |
+| `brei_reitir` | 28 | Broad area definitions |
+| `brei_nofn` | 428 | Broad area names |
+| `afli_skikar` | 1,470 | Catch aggregated by statistical area |
+| `g_reitir` | 182 | Lumpsucker statistical squares |
+| `hafsauga` | 266 | Reference list of statistical square codes (`reitur`) that fall in open ocean; used to flag offshore squares. Oracle comment: *"reiti sem eru út í hafsauga"* |
+| `nordursvaedi` / `sudursvaedi` | 99 / 92 | Northern / southern area codes |
+| `eyjar` | 49 | Island coordinates (DDMM); used to flag near-island positions |
+| `land` | 22 | Country codes |
+| `stadur` | 96 | Harbour and place codes |
+
+### Quality and ratings
+
+`einkunn` (129,952 rows) stores vessel-level quality ratings (`einkunn`
+column) by vessel, year-month (`arman`), and fish type (`fteg`). Used
+historically to assess logbook reporting quality — likely not current.
+
+### `togarar` — trawler register
+
+318 rows. A vessel register restricted to trawlers (`nafn_vorpu` = trawl gear
+name). Not linked to the core logbook tables by a foreign key; rather a
+standing reference for which vessels operated which gear over time.
+
+---
+
+## Family 6 — Specialist subsystems
+
+### Lumpsucker (grasleppa)
+
+A self-contained sub-schema for lumpsucker egg fishery, which has a distinct
+seasonal and spatial pattern (coastal, spring, fixed stations).
+
+| Table | Rows | Description |
+|---|---|---|
+| `g_stofn` | 3,275 | Lumpsucker stations; `skipnr`, `vear`, `stadur`, `gerd_neta`, `moskvi`, `tunnur`, `hrogn` |
+| `g_sokn` | 79,880 | Lumpsucker effort by station |
+| `grasl_stofn` | 9,633 | Later-era lumpsucker stations |
+| `grasl_sokn` | 239,254 | Later-era lumpsucker effort |
+| `grasl_verkun` | 4 | Processing records |
+| `grasleppureitur` | 359 | Lumpsucker-specific statistical squares |
+
+### Lobster (humar)
+
+`humar` (11,965 rows): trap-based lobster records with columns `visir`,
+`gildrur` (traps), `klst` (hours), `breidd`/`lengd` (DDMM position).
+Structurally parallel to `gildra` but maintained as a separate table,
+reflecting the lobster fishery's distinct regulatory framework.
+
+### Catch processing summaries (`urv_*`)
+
+The `urv_` (úrvinnsla = processing) tables store aggregated catch and
+effort by statistical area after editorial review. Gear-specific:
+
+These tables contain a **wide-format denormalized layout**: individual species
+columns (`torskur`, `ysa`, `ufsi`, `karfi`, …) rather than the normalised
+one-row-per-species structure of `afli`. Each row also carries full station
+metadata (`skipnr`, `breidd`, `lengd`, `reitur`, `togtimi`, …), making them
+self-contained aggregation tables. `urv_botnv` coverage begins ~1988 (`lar`
+column). These are likely the source for official catch statistics by area
+rather than the raw `stofn` / `afli` records.
+
+| Table | Rows | Gear |
+|---|---|---|
+| `urv_botnv` | 2,596,988 | Demersal trawl |
+| `urv_dragn` | 999,262 | Seine net |
+| `urv_net` | — | Gillnet |
+| `urv_lina` | — | Longline |
+| `urv_handf` | — | Handline |
+| `urv_raekja` | — | Shrimp trawl |
+
+### `steini` — foreign vessel records
+
+74,425 rows. Records trawl operations by vessels flagged as foreign
+(`thjod = 6`), with `breidd`/`lengd` in DDMM format, tow duration, and
+aggregated catch. Temporal coverage 1995–onwards. Not linked by `visir`
+to the main `stofn` table.
+
+### Advisory office (`ra_*`)
+
+Three small tables: `ra_umsoknir_skip` (1,494 rows), `ra_umsoknir_umbodsmenn`
+(20 rows), `ra_email_skeyti` (137,391 rows). These appear to relate to an
+advisory or quota-application process (`umsoknir` = applications) rather than
+logbook operations, and are not linked by `visir` to the fishing tables.
+
+---
+
+## Key join paths {#sec-joins}
+
+The `visir` key links tables within each layer. The consolidation flow runs
+upward: XML submissions are ingested into the `rafr_*` staging tables and
+simultaneously written to the master tables with negative `visir` values.
+The logger tables sit alongside the staging layer and are not consolidated
+into a paper-era counterpart.
+
+```
+afladagb_xml_mottaka
+       │  xml_sending_visir
+       ▼
+ rafr_stofn ──────────────────► stofn  (negative visir rows)
+ rafr_afli  ──────────────────► afli
+ rafr_toga  ──────────────────► toga
+ rafr_lineha ─────────────────► lineha
+ …
+ sjalfvirkir_maelar  (visir ←── rafr_stofn; no master-table counterpart)
+```
+
+The `stofn.visir` sign convention:
+
+| Sign | Source |
+|---|---|
+| positive | Paper-era record (transcribed from physical logbook) |
+| negative | Electronic-era record (loaded from XML via `rafr_stofn`) |
+
+---
+
+## Database artefacts and caveats
+
+- **Null-date artefacts.** Oracle stores NULL datetime as `1899-12-30`; a
+  handful of rows in `rafr_stofn`, `rafr_sjalfvirkir_maelar`, and
+  `sjalfvirkir_maelar` carry this sentinel. Far-future dates (~2090–2099) also
+  appear and likely represent open-ended validity periods.
+
+- **`eytt` (deleted) flag.** `rafr_stofn` carries an `eytt` column (0/1).
+  Rows with `eytt = 1` should be excluded from analysis.
+
+- **`snt`/`sng`/`sbt`/`sbg` audit columns.** Nearly all electronic tables
+  carry these four columns (stamped-name/time, approved-name/time). They record
+  who entered and who approved each row but are not needed for catch analysis.
+
+- **Views (`v_*`).** Five view definitions are present in the dump
+  (`v_afli`, `v_stofn`, `v_toga`, `v_net`, `v_rafr_skil`) but were exported
+  without data (`num_rows = NA`). They likely represent commonly-used joins
+  or filtered subsets used in the Oracle application layer.

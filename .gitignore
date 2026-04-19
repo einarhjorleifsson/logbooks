@@ -10,3 +10,6 @@ _site
 .positai
 
 **/*.quarto_ipynb
+_freeze
+logbooks.Rproj
+scripts/garbage

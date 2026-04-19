@@ -23,8 +23,15 @@ trip <- read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidiferd.parquet") |>
   mutate(schema = SCHEMA) |>
   select(vid, T1, hid1, T2, hid2, .tid, source, schema, everything())
 
-# Base -------------------------------------------------------------------------
-base <-
+# Station ----------------------------------------------------------------------
+## Strictly speaking a typical logbook station table is actually a combination
+## of a station table and a sample sample table, but by historical convention
+## have been treated as one. If one were to follow the grammar of fisheries
+## data one would have a station containing broad information (date, geograhic
+## location, etc and then a sample table that contains the detail of the gear
+## deployment (lon1, lat1, ... and event times (t0, t1, t2, ...).
+
+station <-
   read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidi.parquet") |>
   wk_translate(dictionary) |>
   rename(.sid = id) |>
@@ -83,7 +90,7 @@ DDM_SOURCES <- c(
   "GAFL BÓK UPPFÆRÐ FRÁ TAKTIKAL"
 )
 
-base <- base |>
+station <- station |>
   mutate(
     ny1 = nchar(as.character(abs(y1))),
     # Normalise y1 to 6-digit DDMMCC for format detection only
@@ -108,7 +115,7 @@ base <- base |>
   select(-ny1, -y1_det, -ddm_signal, -trip_ddm)
 
 ### Convert to decimal degrees -------------------------------------------------
-base <- base |>
+station <- station |>
   mutate(
     nx1 = nchar(as.character(abs(x1))),
     nx2 = nchar(as.character(abs(x2))),
@@ -166,111 +173,66 @@ base <- base |>
   select(.tid, .sid, gid, date, t0, t1, t2, lon1, lat1, lon2, lat2,
          z1, z2, schema, source)
 
-# Effort — aux tables ----------------------------------------------------------
-## Each block inner_joins the gear-specific aux table onto base to compute
-## effort, then selects only .sid + effort columns.  The final station table
-## is assembled with a single left_join so that ALL base rows are retained;
-## stations without an aux record receive NA for effort columns.
-
-## Mobile (dragnót / varpa) ----------------------------------------------------
-mobile_aux <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_dragnot_varpa.parquet") |>
-  wk_translate(dictionary) |>
-  select(.sid, gear_width = sweeps) |>            # sweeps via dictionary (grandarar_lengd)
-  inner_join(base |> select(.sid, gid, t1, t2), by = ".sid") |>
-  mutate(
-    towtime = as.numeric(difftime(t2, t1, units = "mins")),
-    towtime = case_when(
-      gid == 11 & towtime > 60 *  4 ~ 60 *  4,   # Dragnót (SDN)
-      gid ==  6 & towtime > 60 * 12 ~ 60 * 12,   # Botnvarpa (OTB)
-      gid ==  7 & towtime > 60 * 12 ~ 60 * 12,   # Humarvarpa (OTB)
-      gid ==  8 & towtime > 60 * 16 ~ 60 * 16,   # Rækjuvarpa (OTB)
-      gid ==  9 & towtime > 60 * 30 ~ 60 * 30,   # Flotvarpa (OTM)
-      gid == 15 & towtime > 60 * 20 ~ 60 * 20,   # Plógur (DRB)
-      .default = towtime),
-    effort = case_when(
-      gid %in% c(6, 7, 8, 9, 15) ~ towtime / 60,
-      gid == 11                   ~ 1,
-      .default = NA_real_),
-    effort_unit = case_when(
-      gid %in% c(6, 7, 8, 9, 15) ~ "hours towed",
-      gid == 11                   ~ "setting",
-      .default = NA_character_)) |>
-  select(.sid, effort, effort_unit, towtime, gear_width)
-
-## Dredge (plógur) -------------------------------------------------------------
-dredge_aux <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_plogur.parquet") |>
-  wk_translate(dictionary) |>
-  select(.sid, gear_width = breidd) |>            # breidd = plow width; table-specific inline rename
-  inner_join(base |> filter(gid == 15) |> select(.sid, gid, t1, t2), by = ".sid") |>
-  mutate(
-    towtime = as.numeric(difftime(t2, t1, units = "mins")),
-    towtime = case_when(gid == 15 & towtime > 60 * 20 ~ 60 * 20, .default = towtime),
-    effort      = towtime / 60,
-    effort_unit = "hours towed") |>
-  select(.sid, effort, effort_unit, towtime, gear_width)
-
-## Static (longline / gillnet / handline) --------------------------------------
-static_aux <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_linanethandf.parquet") |>
-  wk_translate(dictionary) |>
-  inner_join(base |> select(.sid, gid, t0, t1), by = ".sid") |>
-  left_join(gear_mapping |> filter(version == "new"), by = "gid") |>
-  mutate(
-    nights = floor(as.numeric(difftime(t1, t0, units = "days"))),
-    effort = case_when(
-      gear %in% c("GNS", "GND")  ~ n_nets * nights,
-      gear == "LLS"              ~ n_hooks,
-      gear == "LHM"              ~ n_jigs,
-      .default = NA_real_),
-    effort_unit = case_when(
-      gear %in% c("GNS", "GND") ~ "netnights",
-      gear == "LLS"              ~ "hooks",
-      gear == "LHM"              ~ "hookhours",
-      .default = NA_character_)) |>
-  select(.sid, effort, effort_unit)
-
-## Traps -----------------------------------------------------------------------
-trap_aux <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_gildra.parquet") |>
-  wk_translate(dictionary) |>
-  select(.sid, n_units) |>
-  inner_join(base |> select(.sid, gid, t0, t1), by = ".sid") |>
-  left_join(gear_mapping |> filter(version == "new"), by = "gid") |>
-  mutate(
-    hours = as.numeric(difftime(t1, t0, units = "hours")),
-    effort = case_when(gear == "FPO" ~ n_units * hours, .default = NA_real_),
-    effort_unit = case_when(gear == "FPO" ~ "traphours", .default = NA_character_)) |>
-  select(.sid, effort, effort_unit)
-
-## Seine / purse seine ---------------------------------------------------------
-seine_aux <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_hringn.parquet") |>
-  wk_translate(dictionary) |>
-  select(.sid) |>
-  inner_join(base |> select(.sid, gid), by = ".sid") |>
-  left_join(gear_mapping |> filter(version == "new"), by = "gid") |>
-  mutate(
-    effort = case_when(gear == "PS" ~ 1, .default = NA_real_),
-    effort_unit = case_when(gear == "PS" ~ "setting", .default = NA_character_)) |>
-  select(.sid, effort, effort_unit)
-
-# Stations ---------------------------------------------------------------------
-station <-
-  base |>
-  left_join(
-    bind_rows(mobile_aux, dredge_aux, static_aux, trap_aux, seine_aux),
-    by = ".sid"
-  ) |>
+station <- station |>
   arrange(date, .sid, t0, t1, t2)
 
-## Add "old" gear codes --------------------------------------------------------
+### Add "old" gear codes -------------------------------------------------------
 station <- station |>
   left_join(gear_mapping |>
               filter(version == "new") |>
               select(gid, gid_old = map)) |>
   select(.tid, .sid, gid, gid_old, everything())
+
+# Auxillary tables -------------------------------------------------------------
+## Each block inner_joins the gear-specific aux table onto base to obtain
+## gear code. A final auxillary table is generated downstream and saved.
+## Downstream it can be joined to the station table.
+
+## Mobile (dragnót / varpa) ----------------------------------------------------
+mobile_aux <-
+  read_parquet("data-raw/data-dump/fs_afladagbok/ws_dragnot_varpa.parquet") |>
+  wk_translate(dictionary) |>
+  select(.sid, n_units, g_mesh, g_width, g_length) |> # g_length refers ot seine "tóglengd"
+  inner_join(station |> filter(gid %in% c(1:9, 11)) |> select(.sid), by = ".sid")
+
+## Dredge (plógur) -------------------------------------------------------------
+dredge_aux <-
+  read_parquet("data-raw/data-dump/fs_afladagbok/ws_plogur.parquet") |>
+  wk_translate(dictionary) |>
+  select(.sid, n_units, g_mesh, g_width, g_length, g_height) |>
+  inner_join(station |> filter(gid == 15) |> select(.sid))
+
+## Static (longline / gillnet / handline) --------------------------------------
+static_aux <-
+  # question if "moskvi_haed" refers to gear height
+  read_parquet("data-raw/data-dump/fs_afladagbok/ws_linanethandf.parquet") |>
+  wk_translate(dictionary) |>
+  inner_join(station |> select(.sid, gid) |> filter(gid %in% c(1:5, 12, 14, 22)), by = ".sid") |>
+  left_join(gear_mapping |> filter(version == "new"), by = "gid") |>
+  mutate(n_units =
+         case_when(
+             gear %in% c("GNS", "GND")  ~ n_nets,
+             gear == "LLS"              ~ n_hooks,
+             gear == "LHM"              ~ n_jigs),
+         g_length =
+           case_when(gear %in% c("GNS", "GND") ~ n_units * medal_lengd_neta,
+                     .default = NA)) |>
+  select(.sid, n_units, g_mesh, g_length, g_height)
+
+## Traps -----------------------------------------------------------------------
+trap_aux <-
+  read_parquet("data-raw/data-dump/fs_afladagbok/ws_gildra.parquet") |>
+  wk_translate(dictionary) |>
+  select(.sid, n_units)
+
+## Seine / purse seine ---------------------------------------------------------
+seine_aux <-
+  read_parquet("data-raw/data-dump/fs_afladagbok/ws_hringn.parquet") |>
+  wk_translate(dictionary) |>
+  select(.sid,  g_mesh, g_length, g_height)
+
+## Final auxillary table -------------------------------------------------------
+auxillary <- bind_rows(mobile_aux, dredge_aux, static_aux, trap_aux, seine_aux)
 
 # Catch ------------------------------------------------------------------------
 catch <-
@@ -287,4 +249,5 @@ catch <-
 # Export -----------------------------------------------------------------------
 trip    |> write_parquet("data/fs_afladagbok/trip.parquet")
 station |> write_parquet("data/fs_afladagbok/station.parquet")
+auxillary |> write_parquet("data/fs_afladagbok/auxillary.parquet")
 catch   |> write_parquet("data/fs_afladagbok/catch.parquet")
