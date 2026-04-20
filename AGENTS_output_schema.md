@@ -54,36 +54,58 @@ One row per fishing trip (voyage). `.tid` origin differs by schema:
 
 ## `station.parquet`
 
-One row per fishing operation (set/tow/haul). Gear-specific effort columns are
-populated only for the relevant gear classes; others are `NA`.
+One row per fishing operation. Narrow spatial/temporal envelope only —
+gear and effort detail is in `fishing_sample.parquet`.
 
 | Column | Type | Description |
 |---|---|---|
 | `.tid` | int | Trip identifier |
 | `.sid` | int | Station identifier |
-| `gid` | int | Gear type code — "new" (`fs_afladagbok`) version; unified across schemas |
-| `gid_old` | int | Counterpart old-version gear code; `NA` where no mapping exists |
 | `date` | date | Fishing date |
-| `t0` | datetime | Gear deployment starts (static: first hook/net in water; mobile: warp in water — rarely recorded) |
-| `t1` | datetime | Tow start (mobile) / gear retrieval start (static) |
-| `t2` | datetime | Tow end (mobile) / gear retrieval end (static) |
 | `lon1`, `lat1` | dbl | Start position (decimal degrees) |
 | `lon2`, `lat2` | dbl | End position (decimal degrees) |
-| `sq` | int | Statistical square [1–999]; out-of-range → `NA` |
-| `ssq` | int | Statistical sub-square [0–4]; out-of-range → `NA` |
+| `sq` | int | Statistical square [1–999]; `afli` only — `NA` for `fs_afladagbok` |
+| `ssq` | int | Statistical sub-square [0–4]; `afli` only — `NA` for `fs_afladagbok` |
 | `z1`, `z2` | dbl | Start / end depth |
-| `effort_count` | dbl | Count component of effort (hooks, nets, jigs, trap units, or simultaneous gear count) |
-| `effort_duration` | dbl | Time component of effort in the natural unit implied by `effort_unit` |
-| `effort_unit` | chr | Unit label for the `effort_count × effort_duration` product |
-| `effort` | dbl | Standardised effort: `effort_count × effort_duration` |
-| `towtime` | dbl | Tow duration in minutes (mobile gears) |
-| `gear_width` | dbl | Effective gear width (mobile gears) |
-| `source` | chr | Schema tag |
+| `schema` | chr | Schema tag |
 
-> **Time-column convention note.** `t0`–`t2` follow the Icelandic source
-> convention. The grammar in `grammar.qmd` uses `t0`–`t3` where `t2` =
-> retrieval start and `t3` = retrieval end for all gear types. Aligning the
-> convert scripts is listed in Outstanding Work (AGENTS.md).
+---
+
+## `fishing_sample.parquet`
+
+One row per fishing operation (1:1 with `station.parquet`; join on `.sid`).
+Gear-specific columns are `NA` where not applicable.
+
+| Column | Type | Description |
+|---|---|---|
+| `.tid` | int | Trip identifier |
+| `.sid` | int | Station identifier (PK = FK to `station`) |
+| `gid` | int | Gear type code — "new" version; unified across schemas |
+| `gid_old` | int | Counterpart old-version gear code; `NA` where no mapping exists |
+| `gear` | chr | ICES GearType code (e.g. `"OTB"`, `"LLS"`) |
+| `target2` | chr | Custom Icelandic target code |
+| `t0` | datetime | Gear deployment / operation start |
+| `t1` | datetime | Intermediate event — tow-start for some mobile gear; `NA` where not recorded |
+| `t2` | datetime | Gear retrieval end / operation end |
+| `date` | date | Fishing date |
+| `duration_m` | dbl | Operation duration (minutes); `t2 − t0` for all time-based gears |
+| `.duration_source` | chr | `"data"`, `"capped"`, or `"missing"` |
+| `effort_count` | dbl | Count component of effort (hooks, nets, jigs, trap units, or gear count) |
+| `effort_duration` | dbl | Time component in the natural unit of `effort_unit` |
+| `effort_unit` | chr | Unit label: `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"jig-hours"`, `"trap-hours"`, `"setting"` |
+| `effort` | dbl | `effort_count × effort_duration` |
+| `n_units` | int | Number of gear units (nets, hooks, traps, trawls) |
+| `n_lost` | int | Number of lost gear pieces (`fs_afladagbok` only) |
+| `g_mesh` | dbl | Mesh size |
+| `g_width` | dbl | Gear width (trawls: beam/wing span; dredge: plow width) |
+| `g_length` | dbl | Gear length (seine: rope length; gillnet: total net length) |
+| `g_height` | dbl | Gear height (dredge height; gillnet height) |
+| `schema` | chr | Schema tag |
+
+> **`t1` note.** For `fs_afladagbok`, `t1` (`milli_timi`) is absent for OTB
+> and OTM; `duration_m = t2 − t0` for all time-based gears in this schema.
+> For `afli`, `t1` is tow-start for mobile gear (hhmm derived); static gear
+> `t1` is unrecorded. Grammar alignment (`t0–t3`) is Outstanding Work.
 
 ---
 
@@ -100,12 +122,6 @@ dropped via `inner_join`.
 | `source` | chr | Schema tag |
 
 ---
-
-## `auxillary.parquet` (fs_afladagbok only)
-
-Written by `scripts/01_fs_afladagbok_convert.R`. Combines rows from all five
-gear-specific raw tables into one long table keyed on `.sid`, keeping
-gear-specific fields out of the main station table.
 
 ---
 
@@ -127,9 +143,6 @@ capped `duration_m` (minutes) converted to the natural unit per gear type.
 | Purse seine / ring net | 10, 12 | 1 | 1 | `"setting"` |
 
 ### `fs_afladagbok` schema (new `gid` codes)
-
-Same two-component structure. Not yet fully implemented in
-`01_fs_afladagbok_convert.R`.
 
 | Class | `gid` codes | `effort_count` | `effort_duration` | `effort_unit` |
 |---|---|---|---|---|

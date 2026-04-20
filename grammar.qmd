@@ -101,6 +101,9 @@ any other deliberate operation. Transit legs between stations are not stations.
 This definition is deliberately broad: a CTD cast, a plankton net tow, or a
 hydroacoustic transect all qualify as stations just as a trawl haul does.
 
+Footnote: Historically exact coordinates were not reported, hence in the station
+table one includes any kind of variable that gives approximate location.
+
 ### Multiple sample types at one station
 
 A single station can yield several distinct samples collected simultaneously or

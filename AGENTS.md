@@ -15,19 +15,19 @@ Documentation of the structure, quality, and processing of Icelandic fishing
 logbook data. Raw data originate from Oracle database dumps stored as parquet
 files in `data-raw/data-dump/`.
 
-The primary aim is to merge three fisheries logbook schemas into one unified
-format (`trip`, `station`, `catch` parquet files):
+The primary aim is to merge two fisheries logbook schemas into one unified
+format (`trip`, `station`, `fishing_sample`, `catch` parquet files):
 
 | Schema | Convert script | Output | Status |
 |---|---|---|---|
 | `fs_afladagbok` | `scripts/01_fs_afladagbok_convert.R` | `data/fs_afladagbok/*.parquet` | done |
 | `afli` | `scripts/01_afli_convert.R` | `data/afli/*.parquet` | done |
-| `adb` | `scripts/01_adb_convert.R` | `data/adb/*.parquet` | done |
+| `adb` | `scripts/01_adb_convert.R` | `data/adb/*.parquet` | not in merge |
 | **merged** | `scripts/02_merge.R` | `data/merged/*.parquet` | done |
 
 - `fs_afladagbok` — FisheryScan digital logbooks from Fiskistofa; static dump through 2025-12
 - `afli` — legacy Oracle system; primary historical source (~1950–present); 96 tables
-- `adb` — live-streaming feed (in-house conversion); uses old gear codes natively
+- `adb` — live-streaming feed; **excluded from merge** (old gear codes; less reliable coordinates)
 - `logbook/` — experimental restructuring of `fs_afladagbok`; not actively used
 
 Key structural differences across schemas: start/end of fishing activity
@@ -58,7 +58,7 @@ Full schema documentation in `AGENTS_data_sources.md`.
 - `data-raw/data-dump/fs_afladagbok/` — 8 parquet tables; `ws_veidiferd` (trips), `ws_veidi` (stations), `ws_afli` (catch), plus 5 gear-detail tables
 - `data-raw/data-dump/afli/` — 96 tables; key ones for convert: `stofn` (6.9 M stations), `afli` (catch), `toga`, `lineha`, `gildra`, `hringn`; also notable: `rafr_sjalfvirkir_maelar` (23.6 M logger positions, **wacky coordinates**)
 - `data/gear/gear_mapping.parquet` — maps old ↔ new gear codes; ICES metier vocabulary; built by `data-raw/DATASET_gear-codes.R`
-- Column renaming via `wk_translate()` using `data/dictionary.parquet` (~141 entries; built by `data-raw/DATASET_dictionary.R`)
+- Column renaming via `wk_translate()` using `data/dictionary.parquet` (~154 entries; built by `data-raw/DATASET_dictionary.R`)
 
 ---
 
@@ -66,21 +66,18 @@ Full schema documentation in `AGENTS_data_sources.md`.
 
 Full column tables, effort units, and merge details in `AGENTS_output_schema.md`.
 
-Three output tables per schema: `trip.parquet` (one row per voyage),
-`station.parquet` (one row per fishing operation), `catch.parquet` (one row per
-species per station).
-
-Station columns include: `.tid`, `.sid`, `gid` (new), `gid_old`, `date`,
-`t0`/`t1`/`t2` (timing), `lon1`/`lat1`/`lon2`/`lat2`, `sq`/`ssq`, `z1`/`z2`,
-`effort_count`, `effort_duration`, `effort_unit`, `effort`, `towtime`,
-`gear_width`, `source`.
+Four output tables per schema:
+- `trip.parquet` — one row per voyage (`.tid`, `vid`, `T1`, `hid1`, `T2`, `hid2`, `n_crew`, `source`, `schema`)
+- `station.parquet` — narrow spatial/temporal envelope (`.sid`, `.tid`, `date`, `lon1/lat1/lon2/lat2`, `z1/z2`, `schema`)
+- `fishing_sample.parquet` — gear and effort detail, 1:1 with station (`.sid`, `.tid`, `gid`, `gid_old`, `gear`, `target2`, `t0`–`t3`, `duration_m`, effort columns, gear dims `g_mesh/g_width/g_length/g_height`, `schema`)
+- `catch.parquet` — one row per species per station (`.sid`, `sid`, `catch`)
 
 Effort is two-component: `effort = effort_count × effort_duration`. Units vary
 by gear class: `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"jig-hours"`,
 `"trap-hours"`, `"setting"`.
 
-**Merged output** uses priority rule afli > fs_afladagbok > adb. Current record
-counts (2026-04-12): 7,286,576 stations · 1,838,263 trips · 16,874,343 catch.
+**Merged output** uses two-tier priority: afli > fs_afladagbok. Current record
+counts (2026-04-20): 7,260,215 stations · 1,831,690 trips · 16,782,743 catch rows.
 
 ---
 
@@ -137,7 +134,7 @@ run in parallel with `tar_make(workers = N)`.
 | `grammar.qmd` | Grammar of sea-going observational data — four-level hierarchy, unified column vocabulary, time-naming convention |
 | `afli-tables.qmd` | Full inventory of all 96 afli tables; schema evolution; join paths; wacky coordinate origin |
 | `convert-bugs.qmd` | Convert script audit: bugs found and fixed |
-| `merge.qmd` | Merge rationale, method, timing quality, catch completeness |
+| `merge.qmd` | Merge rationale (afli > fs_afladagbok), two-tier method, coverage analysis, timing quality, catch totals |
 | `wacky_recovery.qmd` | **Combined** wacky coordinate document — discovery, mechanism, recovery, appendices (maths, algorithm, functions) |
 | `ramb-list.qmd` | Informal notes |
 | `_wackytracks.qmd` | Archived; content absorbed into `wacky_recovery.qmd` |
@@ -148,36 +145,29 @@ run in parallel with `tar_make(workers = N)`.
 
 1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Full methodology in `wacky_recovery.qmd`.
 2. **Erroneous timestamps** — year-1899 and year-2090s entries in `rafr_sjalfvirkir_maelar`; likely Oracle null/default date values.
-3. **Convert script bugs** (all fixed 2026-04-11) — `bind_rows` of `inner_join`s silently dropped stations; wrong `date` derivation; missing aux tables; wrong gear code filters; typo in `difftime`; dredge fan-out. Full audit in `convert-bugs.qmd`.
-4. **Catch data gap 2023+** — `adb` catch collapses to near-zero from 2023; source issue (not merge artefact); do not use merged catch beyond 2022 without corrected source.
-5. **Residual t0 ≤ t1 ≤ t2 violations** — 36–67 in afli (negative-.sid garbage records); 153 in adb static gear. Not corrected; filter on ordering before timing-sensitive analyses.
-6. **Unmapped gear codes** — ~4.4% (1,170) of `adb`-only stations have `gid = NA` after old→new gear mapping.
+3. **Residual t0 ≤ t2 violations** — small number in `afli` (negative-.sid garbage records). Filter `.sid > 0` before timing-sensitive analyses.
+4. **DRB duration suspiciously short** — `fs_afladagbok` DRB median ~18 min; may reflect how `upphaf_timi`/`lok_timi` are populated for plow gear. Not investigated.
+5. **~54k OTB stations (2021–2022) with no `ws_dragnot_varpa` record** — `effort_unit = NA` for those rows; source completeness gap in `fs_afladagbok`.
 
 ---
 
 ## Outstanding Work
 
-- [ ] **Investigate `gid = NA` in `adb`-only stations** — identify which `gid_old` codes are unmapped; decide whether to extend `gear_mapping` or accept the gap.
 - [ ] **Apply wacky coordinate recovery at scale** — methodology in `wacky_recovery.qmd` (fwd-bwd smoother; 33–48% turn-angle improvement). Consider contacting Trackwell/SeaData for original DDMMmm integers first (exact recovery). Full archive ~20 M records; parallelise with `furrr::future_map()` or Rcpp. Write corrected parquet to `data/` and notify `../fishydata`.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` — classify Flotvarpa (`ws_veidi`) rows by `uppruni` to separate decimal-degree from DMS sources.
 - [ ] **Confirm longline `effort_count` semantics** — is `fj_kroka` the total hook count (`onglar × bjod` aggregated) or number of lines? Treat hook-day values as approximate until confirmed.
-- [ ] **Align static-gear time columns with grammar convention** — grammar uses `t0`–`t3`; convert scripts use `t1`/`t2` for static gear. Requires renaming `t1`→`t2`, `t2`→`t3`, adding `t3`; update all downstream effort calculations.
+- [ ] **Align static-gear time columns with grammar convention** — grammar uses `t0`–`t3`; `afli` convert script already renames static-gear `t1`→`t2`, `t2`→`t3`; `fs_afladagbok` uses `t0`/`t2` for all gears (t1 absent for trawls). Full t0–t3 alignment across both scripts is deferred.
 
 ### Completed
 
 - [x] `grammar.qmd` completed (2026-04-11/19) — four-level hierarchy, time-naming convention, fishing sample documentation, cross-schema mapping table
-- [x] `merge.qmd` rewritten (2026-04-11) — three-tier rationale and coverage analysis
-- [x] `scripts/01_afli_convert.R` audited and fixed (2026-04-11) — inner_join bug, gid-filter guards
-- [x] `scripts/01_fs_afladagbok_convert.R` audited and fixed (2026-04-11) — five bugs; output 469,881 stations
-- [x] `scripts/01_adb_convert.R` audited and fixed (2026-04-11) — five bugs; output increased to 628,314 stations
-- [x] `scripts/02_merge.R` refactored to three-tier (2026-04-12) — 7,286,576 stations, 1,838,263 trips, 16,874,343 catch
+- [x] `scripts/01_afli_convert.R` audited, fixed, and rewritten (2026-04-11/20) — produces `trip`, `station`, `fishing_sample`, `sensor`, `catch`; gear dims renamed to `g_*` prefix
+- [x] `scripts/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t2−t0` for all time-based gears
+- [x] `scripts/02_merge.R` refactored to two-tier (2026-04-20) — adb dropped; `fishing_sample` added to merge; 7,260,215 stations, 1,831,690 trips, 16,782,743 catch rows
+- [x] `merge.qmd` rewritten (2026-04-20) — two-tier afli + fs_afladagbok; timing analysis in fishing_sample; coverage, timing quality, catch sections
 - [x] `_targets.R` created (2026-04-12) — 12 targets, 4 tiers, parallelisable Tier-1
-- [x] Dictionary script relocated to `data-raw/DATASET_dictionary.R` (2026-04-11)
-- [x] `index.qmd` created (2026-04-11)
-- [x] `scripts/01_fs_afladagbok_convert.R` restructured (2026-04-12) — shared SCHEMA constant, separate aux blocks, `auxillary.parquet` output
-- [x] `data-raw/DATASET_dictionary.R` extended (2026-04-19) — afli gear-detail tables added; ~141 entries total; `adb` block fixed
-- [x] `afli-tables.qmd` written and corrected (2026-04-19) — 96-table inventory, three eras, wacky coordinate origin confirmed sender-side
+- [x] `data-raw/DATASET_dictionary.R` extended (2026-04-19/20) — afli gear-detail tables + `medal_lengd_neta`; 154 entries total
+- [x] `afli-tables.qmd` written (2026-04-19) — 96-table inventory, three eras, wacky coordinate origin confirmed sender-side
 - [x] `scripts/01_afladagb_xml_nmea.R` written (2026-04-19) — extracts NMEA from XML into `data/afli/nmea.parquet`
-- [x] `scripts/01_afli_convert.R` select() calls fixed (2026-04-19) — 6 calls updated to use translated names
 - [x] `_quarto.yml` navbar reorganised (2026-04-19) — all QMD documents, left-to-right narrative order
-- [x] Wacky coordinate documents merged (2026-04-19) — `wackytracks.qmd` + `WACKY_COORDS.md` + `wacky_recovery.qmd` → single `wacky_recovery.qmd`; inverted-pyramid structure; old files archived/deleted
+- [x] Wacky coordinate documents merged (2026-04-19) — single `wacky_recovery.qmd`; inverted-pyramid structure
