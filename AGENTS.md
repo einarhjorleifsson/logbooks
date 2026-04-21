@@ -24,6 +24,9 @@ format (`trip`, `station`, `fishing_sample`, `catch` parquet files):
 | `afli` | `scripts/01_afli_convert.R` | `data/afli/*.parquet` | done |
 | `adb` | `scripts/01_adb_convert.R` | `data/adb/*.parquet` | not in merge |
 | **merged** | `scripts/02_merge.R` | `data/merged/*.parquet` | done |
+| **siritar** | `scripts/01_siritar.R` | `data/afli/sensor_GPS.parquet` | in progress |
+
+`scripts/01_siritar.R` — AIS-based wacky coordinate recovery for `sjalfvirkir_maelar`/`rafr_sjalfvirkir_maelar`. Interpolates corrected lon/lat from AIS tracks (`data/trail`) onto GPS logger timestamps; retains original wacky coords as `w_lon`/`w_lat`. `dt_sec` is the time gap between adjacent rows in the combined gps+AIS sequence — an approximation of the interpolation interval (larger → less reliable position). `approx(..., rule = 1)`: lon/lat will be `NA` where AIS does not bracket the GPS timestamp.
 
 - `fs_afladagbok` — FisheryScan digital logbooks from Fiskistofa; static dump through 2025-12
 - `afli` — legacy Oracle system; primary historical source (~1950–present); 96 tables
@@ -131,7 +134,7 @@ run in parallel with `tar_make(workers = N)`.
 | File | Topic |
 |---|---|
 | `index.qmd` | Non-technical landing page |
-| `grammar.qmd` | Grammar of sea-going observational data — four-level hierarchy, unified column vocabulary, time-naming convention |
+| `grammar.qmd` | Grammar of sea-going observational data — four-level hierarchy, unified column vocabulary, time-naming convention; sensor layer (two-table structure, station supplement vs time-series); parallel projects pattern (landings, surveys) |
 | `afli-tables.qmd` | Full inventory of all 96 afli tables; schema evolution; join paths; wacky coordinate origin |
 | `convert-bugs.qmd` | Convert script audit: bugs found and fixed |
 | `merge.qmd` | Merge rationale (afli > fs_afladagbok), two-tier method, coverage analysis, timing quality, catch totals |
@@ -143,7 +146,7 @@ run in parallel with `tar_make(workers = N)`.
 
 ## Known data quality issues
 
-1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Full methodology in `wacky_recovery.qmd`.
+1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Mathematical recovery documented in `wacky_recovery.qmd`. AIS-based recovery implemented in `scripts/01_siritar.R` (interpolates AIS ground-truth positions; in progress — see bugs listed above).
 2. **Erroneous timestamps** — year-1899 and year-2090s entries in `rafr_sjalfvirkir_maelar`; likely Oracle null/default date values.
 3. **Residual t0 ≤ t2 violations** — small number in `afli` (negative-.sid garbage records). Filter `.sid > 0` before timing-sensitive analyses.
 4. **DRB duration suspiciously short** — `fs_afladagbok` DRB median ~18 min; may reflect how `upphaf_timi`/`lok_timi` are populated for plow gear. Not investigated.
@@ -153,14 +156,15 @@ run in parallel with `tar_make(workers = N)`.
 
 ## Outstanding Work
 
-- [ ] **Apply wacky coordinate recovery at scale** — methodology in `wacky_recovery.qmd` (fwd-bwd smoother; 33–48% turn-angle improvement). Consider contacting Trackwell/SeaData for original DDMMmm integers first (exact recovery). Full archive ~20 M records; parallelise with `furrr::future_map()` or Rcpp. Write corrected parquet to `data/` and notify `../fishydata`.
+- [ ] **Finalise `scripts/01_siritar.R`** — schema bug fixed; output renamed to `sensor_GPS.parquet`. Remaining: run at full scale and write corrected parquet to `data/afli/`; notify `../fishydata`.
+- [ ] **Characterise AIS coverage gaps** — `approx(..., rule = 1)` produces NA lon/lat where AIS does not bracket GPS timestamps; quantify how many sensor records end up with NA positions.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` — classify Flotvarpa (`ws_veidi`) rows by `uppruni` to separate decimal-degree from DMS sources.
 - [ ] **Confirm longline `effort_count` semantics** — is `fj_kroka` the total hook count (`onglar × bjod` aggregated) or number of lines? Treat hook-day values as approximate until confirmed.
 - [ ] **Align static-gear time columns with grammar convention** — grammar uses `t0`–`t3`; `afli` convert script already renames static-gear `t1`→`t2`, `t2`→`t3`; `fs_afladagbok` uses `t0`/`t2` for all gears (t1 absent for trawls). Full t0–t3 alignment across both scripts is deferred.
 
 ### Completed
 
-- [x] `grammar.qmd` completed (2026-04-11/19) — four-level hierarchy, time-naming convention, fishing sample documentation, cross-schema mapping table
+- [x] `grammar.qmd` updated (2026-04-21) — sensor layer section added (station supplement vs time-series distinction; multi-table, multi-resolution pattern; NMEA foreshadowing); parallel-projects extension added (landings, surveys, continuous underway); landings section reframed as parallel-project prototype
 - [x] `scripts/01_afli_convert.R` audited, fixed, and rewritten (2026-04-11/20) — produces `trip`, `station`, `fishing_sample`, `sensor`, `catch`; gear dims renamed to `g_*` prefix
 - [x] `scripts/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t2−t0` for all time-based gears
 - [x] `scripts/02_merge.R` refactored to two-tier (2026-04-20) — adb dropped; `fishing_sample` added to merge; 7,260,215 stations, 1,831,690 trips, 16,782,743 catch rows

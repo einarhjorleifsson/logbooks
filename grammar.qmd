@@ -535,6 +535,44 @@ automatic logger readings linked to the same station via `visir` (`.sid`). The
 logger table is a sample in the grammar's sense — a different observation type,
 at a finer temporal resolution, recorded alongside the main fishing operation.
 
+### The sensor layer — multiple tables at different levels
+
+The logbook project currently maintains two sensor-level tables for the `afli`
+schema, and their structural difference is instructive:
+
+| Table | Rows | Has `time`? | Grammar level |
+|---|--:|:--:|---|
+| `data/afli/sensor.parquet` | ~3.9 M | No | Station supplement |
+| `data/afli/sensor_GPS.parquet` | ~27 M | Yes | Measurement (time-series) |
+
+`sensor.parquet` carries one row per station — gear flags, surface/bottom/
+headline temperatures, headline depth — with no timestamp column. It is a
+**station-level supplement**: sensor readings that have already been aggregated
+or summarised to the station envelope. It belongs conceptually alongside the
+station record, not inside a time-series.
+
+`sensor_GPS.parquet` carries many rows per station, each with a timestamp and
+a position (`lon`/`lat`, corrected from AIS), plus speed, heading, depth, and
+temperature channels. It is a **measurement-level time-series**: one row per
+logger tick, keyed on `(.tid, .sid, vid, time)`. The original wacky coordinates
+are retained as `w_lon`/`w_lat`; `dt_sec` records the interpolation interval
+used in the AIS-based position correction.
+
+This split reflects a real structural difference that the grammar should make
+explicit rather than paper over with a single "sensor" label. A single physical
+logger records multiple channels — GPS, depth, temperature, heading — at a
+common tick rate. But other instruments (e.g. NMEA-connected sensors: net
+mensuration systems, echo sounders, flow-through temperature chains) may operate
+at different sampling rates and produce separate data streams. Each stream is
+a candidate for its own measurement-level table, keyed on `.sid` and a
+timestamp, with `instrument_id` identifying the physical source.
+
+**Consequence for downstream code.** The two tables are not interchangeable.
+Use `sensor_GPS.parquet` for position time-series and spatial analysis; use
+`sensor.parquet` for station-level environmental covariates. Where
+`sensor_GPS.parquet` has `NA` lon/lat (AIS coverage absent), fall back to
+station-level position from `station.parquet`.
+
 ## Level 4 — Observation / Measurement
 
 At the lowest level sit the individual observations or measurements produced
@@ -569,7 +607,10 @@ for different reasons, and the dot prefix is the only disambiguation needed.
 ## Landings — a parallel data stream *(commercial fisheries)*
 
 The following section is specific to commercial fisheries; it has no direct
-equivalent for scientific survey voyages.
+equivalent for scientific survey voyages. It also serves as the prototype for
+how a *parallel project* plugs into the grammar: a distinct institutional data
+source with its own schema, linked to the logbook hierarchy by shared natural
+keys rather than by shared processing code.
 
 Landings records are not a level within the observation hierarchy; they are a
 parallel stream collected independently of the logbook by a third party — a
@@ -925,14 +966,16 @@ vocabulary — that sit alongside the grammar tables but are not part of the
 core hierarchy. Keeping them separate means the grammar itself is stable even
 as vocabularies evolve.
 
-Two extensions are of immediate practical interest:
+Three extensions are of immediate practical interest:
 
-1. **Sample table for logger data.** The automatic logger records in `afli`
-   (`rafr_sjalfvirkir_maelar`) currently exist as a parallel table linked by
-   `.sid` but without a formal sample identifier. Introducing `.smid` would
-   allow multiple logger sessions per station to be cleanly represented and
-   would make the hierarchy fully consistent. The same structure would cover
-   VMS / AIS ping tables once they are linked to individual station records.
+1. **Formalise the sensor layer.** The two existing sensor tables
+   (`sensor.parquet` as station supplement, `sensor_GPS.parquet` as position
+   time-series) already expose the multi-table, multi-resolution nature of the
+   sensor layer. As NMEA-sourced instrument streams are formalised — dedicated
+   tables per sensor type at their native sampling rate — a formal sample
+   identifier (`.smid`) will be needed to link concurrent sensor sessions to the
+   same station cleanly and to make the four-level hierarchy fully consistent
+   across all data types.
 
 2. **`station_type` provenance flag.** A `station_type` column on the station
    table records whether a row represents a genuine individual fishing operation,
@@ -940,3 +983,28 @@ Two extensions are of immediate practical interest:
    reconstructed from VMS / AIS pings. The full vocabulary and its role in
    joint analysis across resolution levels is described in the
    [Resolution and the hierarchy](#resolution-and-the-hierarchy) section.
+
+3. **Parallel projects within the same grammar.** The logbook project is one of
+   several anticipated data projects that share this four-level structure and
+   column vocabulary:
+
+   - **Landings.** Landing declarations — vessel, date, harbour, species, weight
+     — are the natural counterpart to logbook catch (see
+     [Landings](#landings-a-parallel-data-stream)). A dedicated landings project
+     would formalise the institutional data sources, de-duplication logic, and
+     linkage to logbook trips that mirror what the logbook project does for
+     at-sea records.
+   - **Oceanographic and biological surveys.** Research vessels collecting
+     hydrographic, acoustic, and biological data operate within the same
+     hierarchy. The grammar was designed from the outset to accommodate these
+     alongside fishing data; the sample-type vocabulary (`"ctd"`, `"trawl"`,
+     `"acoustic"`, etc.) provides the hook.
+   - **Continuous underway data.** Sea-surface temperature, salinity, and
+     acoustics recorded throughout a voyage fit naturally in the measurement-
+     level time-series pattern already illustrated by `sensor_GPS.parquet`.
+
+   All parallel projects share the same column vocabulary and key conventions.
+   Cross-project joins — logbook catch linked to landing declarations by
+   `(vid, T2, hid2)`, research survey stations overlaid on commercial fishing
+   grounds, continuous underway data attributed to logbook trips — require no
+   schema translation.

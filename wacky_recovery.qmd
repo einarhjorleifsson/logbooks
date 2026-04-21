@@ -553,21 +553,58 @@ siriti_fb |>
 
 ---
 
+## AIS-based recovery (alternative approach)
+
+An independent recovery strategy is implemented in `scripts/01_siritar.R`.
+Rather than resolving ambiguous positions algorithmically, this script
+**interpolates corrected positions directly from AIS tracks** (`data/trail`,
+copied from `../fishydata`), which are free of the DDMMmm encoding error.
+
+The approach:
+
+1. Load both GPS logger tables (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`)
+   and rename columns to a unified schema (`w_lon`/`w_lat` retain the original
+   wacky values).
+2. For each year 2008–2023, load AIS records for the vessels present in the GPS
+   data and combine the two sources in time order.
+3. Use `approx(..., method = "linear", rule = 1)` to interpolate AIS lon/lat
+   onto every GPS timestamp. AIS positions serve as anchor points; GPS rows
+   receive interpolated coordinates. Where AIS does not bracket a GPS timestamp
+   (`rule = 1`), the corrected position is `NA`.
+4. Filter back to GPS-source rows only and write the result to
+   `data/afli/sensor_XXX.parquet`.
+
+This approach is conceptually simpler than the forward–backward resolver and
+eliminates the ~63% ambiguous-record problem entirely, at the cost of depending
+on AIS coverage. Rows where AIS is absent or sparse will have `NA` lon/lat.
+
+**`dt_sec` interpretation.** The column records the time gap between adjacent
+rows in the combined gps + AIS sequence *before* AIS rows are filtered out.
+It therefore approximates the **interpolation interval** around each GPS
+timestamp — how far apart the bracketing AIS anchors were in time. Larger
+`dt_sec` means the interpolated position is less constrained.
+
+**`NA` positions.** `approx(..., rule = 1)` suppresses extrapolation. GPS
+records that fall outside the time range of available AIS data for a vessel
+will have `lon = lat = NA`. The scale of this gap is not yet quantified.
+
+**Status:** schema duplication bug fixed; output renamed to `sensor_GPS.parquet`.
+Remaining: run at full scale; characterise NA coverage; write to `data/afli/`.
+
+---
+
 ## Outstanding work
 
-- **Apply recovery at scale.** The development subset covers one small area in
-  2017. The full archive spans ~20 M valid records (2008–2020); parallelise with
-  `furrr::future_map()` or rewrite the inner resolver loop in Rcpp.
-- **Write corrected parquet.** Output to `data/` and notify `../fishydata`.
+- **Run `scripts/01_siritar.R` at full scale** — write corrected parquet to
+  `data/afli/sensor_GPS.parquet` and notify `../fishydata`.
+- **Characterise AIS coverage gaps** — quantify how many sensor records end up
+  with `NA` corrected positions (AIS does not bracket their timestamps).
 - **Consider contacting Trackwell/SeaData** for the original DDMMmm integer
-  values — this would give exact positions for all records without algorithmic
-  uncertainty or the ~4% confidence split.
+  values — this would give exact positions for all records without any coverage
+  dependency.
 - **Clarify `logbook/` schema exposure** — determine whether the experimental
   `logbook/` restructuring also carried wacky values through to its coordinate
   columns.
-- **Wind correction.** `skip_stefna` (heading) diverges from actual vessel
-  trajectory in cross-wind conditions. Incorporating `vindhradi`/`vindstefna`
-  (available in the wider `sjalfvirkir_maelar` table) could sharpen the resolver.
 
 ---
 
