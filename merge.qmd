@@ -71,10 +71,10 @@ and the other has others.
 ## Why afli takes priority
 
 The key reason is **mobile gear timing precision**. In `afli`, tow-start time
-(`t1`) is derived from the on-bottom clock (`ibotni`), an HHMM integer entered
-by the skipper to record when the gear reached the seabed. Tow-end (`t2`) is
-then `t1 + towtime`. In `fs_afladagbok`, `t1` is not recorded for OTB or OTM;
-duration is instead computed as `t2 − t0` (end-of-operation minus
+(`t2`) is derived from the on-bottom clock (`ibotni`), an HHMM integer entered
+by the skipper to record when the gear reached the seabed. Tow-end (`t3`) is
+then `t2 + towtime`. In `fs_afladagbok`, `t2` and `t3` are not recorded for
+OTB or OTM; duration is instead computed as `t4 − t1` (end-of-operation minus
 start-of-operation), which includes deployment and hauling time in addition to
 actual tow time.
 
@@ -89,10 +89,10 @@ merged_fs |>
   group_by(Schema = schema, `Gear` = gear) |>
   summarise(
     Stations     = n(),
-    `t0 (%)` = round(mean(!is.na(t0)) * 100, 1),
     `t1 (%)` = round(mean(!is.na(t1)) * 100, 1),
     `t2 (%)` = round(mean(!is.na(t2)) * 100, 1),
     `t3 (%)` = round(mean(!is.na(t3)) * 100, 1),
+    `t4 (%)` = round(mean(!is.na(t4)) * 100, 1),
     `duration_m (%)` = round(mean(!is.na(duration_m)) * 100, 1),
     .groups = "drop"
   ) |>
@@ -102,13 +102,13 @@ merged_fs |>
   tab_style(
     style = cell_fill(color = "#fff3cd"),
     locations = cells_body(
-      columns = c(`t1 (%)`),
-      rows = Schema == "afli" & Gear %in% c("OTB", "OTM") & `t1 (%)` > 50
+      columns = c(`t2 (%)`),
+      rows = Schema == "afli" & Gear %in% c("OTB", "OTM") & `t2 (%)` > 50
     )
   )
 ```
 
-For bottom trawl (OTB), `afli` achieves ~86% `t1` coverage (on-bottom clock)
+For bottom trawl (OTB), `afli` achieves ~86% `t2` coverage (on-bottom clock)
 versus 0% in `fs_afladagbok`. The `duration_m` in `afli` is the recorded tow
 time on the seabed; in `fs_afladagbok` it is the full operation window from
 warp-entry to hauling completion, which is systematically longer.
@@ -251,22 +251,22 @@ class:
 
 | Schema | Mobile gear | Static gear |
 |---|---|---|
-| `afli` | `t1` tow-start (on-bottom clock); `t2` = `t1` + tow minutes | `t2` retrieval start; `t3` retrieval end (grammar-aligned) |
-| `fs_afladagbok` | `t0` operation start; `t2` operation end (`t1` absent for OTB/OTM) | `t0` deployment start; `t2` retrieval end |
+| `afli` | `t2` tow-start (on-bottom clock); `t3` = `t2` + tow minutes | `t3` retrieval start; `t4` retrieval end |
+| `fs_afladagbok` | `t1` deployment start; `t4` operation end (`t2`, `t3` absent for OTB/OTM) | `t1` deployment start; `t3` retrieval start; `t4` retrieval end |
 
-## t0 ≤ t2 ordering violations
+## t1 ≤ t4 ordering violations
 
 ```{r}
 #| label: tbl-timing-violations
-#| tbl-cap: "t0 > t2 ordering violations by schema (fishing_sample)"
+#| tbl-cap: "t1 > t4 ordering violations by schema (fishing_sample)"
 
 merged_fs |>
-  filter(!is.na(t0), !is.na(t2)) |>
+  filter(!is.na(t1), !is.na(t4)) |>
   group_by(Schema = schema) |>
   summarise(
-    `Rows with t0 and t2` = n(),
-    `t0 > t2 violations`  = sum(t0 > t2),
-    `Violation rate (%)`  = round(mean(t0 > t2) * 100, 3),
+    `Rows with t1 and t4` = n(),
+    `t1 > t4 violations`  = sum(t1 > t4),
+    `Violation rate (%)`  = round(mean(t1 > t4) * 100, 3),
     .groups = "drop"
   ) |>
   gt() |>
@@ -310,7 +310,7 @@ recording in the legacy system.
 #| fig-height: 4
 
 merged_catch |>
-  left_join(merged_station |> select(.sid, date, schema), by = ".sid") |>
+  left_join(merged_station |> select(.sid, date, schema), by = join_by(.sid, schema)) |>
   mutate(yr = lubridate::year(date)) |>
   filter(between(yr, 1990, 2025)) |>
   group_by(yr, schema) |>
@@ -325,7 +325,7 @@ merged_catch |>
 #| tbl-cap: "Annual catch totals, 2018–2025 (thousands of tonnes)"
 
 merged_catch |>
-  left_join(merged_station |> select(.sid, date, schema), by = ".sid") |>
+  left_join(merged_station |> select(.sid, date, schema),by = join_by(.sid, schema)) |>
   mutate(yr = lubridate::year(date)) |>
   filter(between(yr, 2018, 2025)) |>
   group_by(yr, schema) |>
@@ -344,12 +344,12 @@ merged_catch |>
    provenance; downstream joins should always key on `(schema, .sid)` rather
    than `.sid` alone.
 
-2. **Residual t0 ≤ t2 violations**: see @tbl-timing-violations. Small in
+2. **Residual t1 ≤ t4 violations**: see @tbl-timing-violations. Small in
    absolute terms and confined to known garbage records in `afli`.
    Filter `.sid > 0` before timing-sensitive analyses.
 
 3. **Mobile gear timing in fs_afladagbok**: `duration_m` for OTB/OTM is
-   `t2 − t0` (full operation time), not pure tow time on the seabed.
+   `t4 − t1` (full operation time), not pure tow time on the seabed.
    This is systematically longer than the tow-time recorded in `afli`.
    In the merged output, OTB/OTM vessel-days covered by `afli` use the more
    precise measure; `fs_afladagbok`-only records use the coarser estimate.

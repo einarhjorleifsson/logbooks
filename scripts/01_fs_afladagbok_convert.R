@@ -34,7 +34,7 @@ trip <-
 # Source (ws_veidi) -----------------------------------------------------------
 # Translate columns, join trip-level `source` for coordinate classification,
 # then convert raw integer coordinates to decimal degrees.
-# After this block `source` has: .sid .tid gid t0 t1 t2 lon1 lat1 lon2 lat2
+# After this block `source` has: .sid .tid gid t1 t3 t4 lon1 lat1 lon2 lat2
 # z1 z2 n_lost date schema.
 source <-
   read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidi.parquet") |>
@@ -116,11 +116,11 @@ source <-
     lat2 = ifelse(between(lat2,    0,  89), lat2, NA_real_)
   ) |>
   mutate(
-    date   = as_date(coalesce(t0, t1, t2)),
+    date   = as_date(coalesce(t1, t3, t4)),
     schema = SCHEMA
   ) |>
   select(-c(x1, y1, x2, y2, nx1, nx2, ny1, ny2, coord_fmt, source)) |>
-  arrange(date, .sid, t0, t1, t2)
+  arrange(date, .sid, t1, t3, t4)
 
 # Helper: station keys + ICES gear labels for inner-joining aux tables
 source_gear <- source |>
@@ -246,15 +246,16 @@ gear_caps <- tribble(
 ## Assemble fishing_sample -----------------------------------------------------
 fishing_sample <-
   source |>
-  select(.tid, .sid, gid, t0, t1, t2, date, n_lost, schema) |>
+  select(.tid, .sid, gid, t1, t3, t4, date, n_lost, schema) |>
+  mutate(t2 = NA_POSIXct_) |>
   left_join(gear_mapping |> select(gid, gid_old = map, gear, target2), by = "gid") |>
   # Duration by gear class:
-  #   t1 (milli_timi) is absent for OTB/OTM/DRB, so duration = t2 − t0
+  #   t3 (milli_timi) is absent for OTB/OTM/DRB, so duration = t4 − t1
   #   for all time-based gears (full operation from warp-entry / gear-set to
   #   hauling end / retrieval end). SDN / PS effort is per setting, no duration.
   mutate(duration_m = case_when(
     gear %in% c("OTB", "OTM", "DRB", "LLS", "GNS", "GND", "LHM", "FPO") ~
-      as.numeric(difftime(t2, t0, units = "mins")),
+      as.numeric(difftime(t4, t1, units = "mins")),
     .default = NA_real_
   )) |>
   # Apply per-gid duration caps
@@ -287,7 +288,7 @@ fishing_sample <-
   ) |>
   # Gear dimensions
   left_join(dims |> select(-effort_count, -effort_unit), by = ".sid") |>
-  select(.tid, .sid, gid, gid_old, gear, target2, t0, t1, t2, date,
+  select(.tid, .sid, gid, gid_old, gear, target2, t1, t2, t3, t4, date,
          duration_m, .duration_source,
          effort_count, effort_duration, effort_unit, effort,
          n_units, n_lost, g_mesh, g_width, g_length, g_height,
@@ -329,11 +330,11 @@ if (FALSE) {
   fishing_sample |>
     count(gear, effort_unit, .duration_source)
 
-  ## t-ordering QC (t0 ≤ t1 ≤ t2) ---------------------------------------------
+  ## t-ordering QC (t1 ≤ t3 ≤ t4) ---------------------------------------------
   fishing_sample |>
-    filter(!is.na(t0), !is.na(t2)) |>
-    summarise(t0_before_t2 = mean(t0 <= t2, na.rm = TRUE),
-              t1_before_t2 = mean(t1 <= t2, na.rm = TRUE))
+    filter(!is.na(t1), !is.na(t4)) |>
+    summarise(t1_before_t4 = mean(t1 <= t4, na.rm = TRUE),
+              t3_before_t4 = mean(t3 <= t4, na.rm = TRUE))
 
   ## Station coverage over time ------------------------------------------------
   station |>

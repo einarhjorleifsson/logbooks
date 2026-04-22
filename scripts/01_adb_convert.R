@@ -22,9 +22,9 @@ trip <- read_parquet("data-raw/data-dump/adb/trip_v.parquet") |>
 base <-
   read_parquet("data-raw/data-dump/adb/station_v.parquet") |>
   wk_translate(dictionary) |>
-  mutate(date = as_date(coalesce(t0, t1, t2))) |>
+  mutate(date = as_date(coalesce(t1, t3, t4))) |>
   select(.tid, .sid, gid, date,
-         t0, t1, t2,
+         t1, t3, t4,
          lon1, lat1, lon2, lat2,
          z1, z2)
 
@@ -38,9 +38,9 @@ base <-
 mobile_aux <-
   read_parquet("data-raw/data-dump/adb/trawl_and_seine_net_v.parquet") |>
   wk_translate(dictionary) |>                  # station_id → .sid; bridle_length → sweeps
-  inner_join(base |> select(.sid, gid, t1, t2), by = ".sid") |>
+  inner_join(base |> select(.sid, gid, t3, t4), by = ".sid") |>
   mutate(
-    towtime = as.numeric(difftime(t2, t1, units = "mins")),
+    towtime = as.numeric(difftime(t4, t3, units = "mins")),
     effort = case_when(
       gid %in% c(6, 7, 14) ~ towtime / 60,
       gid == 5              ~ 1,
@@ -60,9 +60,9 @@ mobile_aux <-
 dredge_aux <-
   read_parquet("data-raw/data-dump/adb/dredge_v.parquet") |>
   wk_translate(dictionary) |>
-  inner_join(base |> select(.sid, t1, t2), by = ".sid") |>
+  inner_join(base |> select(.sid, t3, t4), by = ".sid") |>
   mutate(
-    towtime   = as.numeric(difftime(t2, t1, units = "mins")),
+    towtime   = as.numeric(difftime(t4, t3, units = "mins")),
     effort    = towtime / 60,
     effort_unit = "hours towed",
     gear_width  = width
@@ -73,9 +73,9 @@ dredge_aux <-
 static_aux <-
   read_parquet("data-raw/data-dump/adb/line_and_net_v.parquet") |>
   wk_translate(dictionary) |>
-  inner_join(base |> select(.sid, gid, t1, t2), by = ".sid") |>
+  inner_join(base |> select(.sid, gid, t3, t4), by = ".sid") |>
   mutate(
-    dt = as.numeric(difftime(t2, t1, units = "hours")),
+    dt = as.numeric(difftime(t4, t3, units = "hours")),
     effort = case_when(
       gid == 1                             ~ hooks,
       gid %in% c(2, 11, 25, 29, 91, 92)   ~ nets * dt / 24,
@@ -95,9 +95,9 @@ static_aux <-
 trap_aux <-
   read_parquet("data-raw/data-dump/adb/trap_v.parquet") |>
   wk_translate(dictionary) |>
-  inner_join(base |> select(.sid, t1, t2), by = ".sid") |>
+  inner_join(base |> select(.sid, t3, t4), by = ".sid") |>
   mutate(
-    dt          = as.numeric(difftime(t2, t1, units = "hours")),
+    dt          = as.numeric(difftime(t4, t3, units = "hours")),
     effort      = number_of_traps * dt,
     effort_unit = "traphours"
   ) |>
@@ -119,7 +119,7 @@ station <-
     by = ".sid"
   ) |>
   mutate(schema = SCHEMA) |>
-  arrange(date, .sid, t0, t1, t2)
+  arrange(date, .sid, t1, t3, t4)
 
 # catch ------------------------------------------------------------------------
 catch <-

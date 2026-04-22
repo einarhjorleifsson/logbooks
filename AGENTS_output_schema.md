@@ -84,11 +84,12 @@ Gear-specific columns are `NA` where not applicable.
 | `gid_old` | int | Counterpart old-version gear code; `NA` where no mapping exists |
 | `gear` | chr | ICES GearType code (e.g. `"OTB"`, `"LLS"`) |
 | `target2` | chr | Custom Icelandic target code |
-| `t0` | datetime | Gear deployment / operation start |
-| `t1` | datetime | Intermediate event — tow-start for some mobile gear; `NA` where not recorded |
-| `t2` | datetime | Gear retrieval end / operation end |
+| `t1` | datetime | Gear deployment starts (Event 1) |
+| `t2` | datetime | Gear deployment ends (Event 2) — currently unrecorded; `NA` throughout |
+| `t3` | datetime | Gear retrieval starts (Event 3) — for `afli` mobile: tow start (derived from on-bottom clock); for static gear: first hook/buoy hauled; `NA` where not recorded |
+| `t4` | datetime | Gear retrieval ends (Event 4) — for mobile: `NA`; for static: last hook/buoy on board |
 | `date` | date | Fishing date |
-| `duration_m` | dbl | Operation duration (minutes); `t2 − t0` for all time-based gears |
+| `duration_m` | dbl | Operation duration (minutes); `t4 − t1` for all time-based gears (full window); for `afli` mobile: `t3 − t2` (tow time only) |
 | `.duration_source` | chr | `"data"`, `"capped"`, or `"missing"` |
 | `effort_count` | dbl | Count component of effort (hooks, nets, jigs, trap units, or gear count) |
 | `effort_duration` | dbl | Time component in the natural unit of `effort_unit` |
@@ -103,10 +104,10 @@ Gear-specific columns are `NA` where not applicable.
 | `back_entry` | lgl | `TRUE` for pre-1980 records with `.sid > 2,500,000` — retrospective back-entries; `FALSE` for genuine contemporaneous records and all post-1979 data. `afli` only; `NA` for `fs_afladagbok`. See `afli-backentry.qmd`. |
 | `schema` | chr | Schema tag |
 
-> **`t1` note.** For `fs_afladagbok`, `t1` (`milli_timi`) is absent for OTB
-> and OTM; `duration_m = t2 − t0` for all time-based gears in this schema.
-> For `afli`, `t1` is tow-start for mobile gear (hhmm derived); static gear
-> `t1` is unrecorded. Grammar alignment (`t0–t3`) is Outstanding Work.
+> **Effort duration note.** For `afli` mobile gear, `duration_m` is the tow
+> time on the seabed (`t3 − t2`). For `fs_afladagbok` and `afli` static gear,
+> `duration_m = t4 − t1` (full operation window). `t2` (deployment end) is
+> `NA` throughout; `t3` is `NA` for `fs_afladagbok` mobile gear.
 
 ---
 
@@ -179,12 +180,12 @@ capped `duration_m` (minutes) converted to the natural unit per gear type.
 
 | Class | `gid` codes | `effort_count` | `effort_duration` | `effort_unit` |
 |---|---|---|---|---|
-| Mobile trawl | 6, 7, 8, 9, 15 | `n_units` (default 1) | `duration_m` from `difftime(t2, t1)`; capped | `"gear-minutes"` |
+| Mobile trawl | 6, 7, 8, 9, 15 | `n_units` (default 1) | `duration_m` from `difftime(t3, t2)`; capped | `"gear-minutes"` |
 | Mobile dragnót | 11 | 1 | 1 | `"setting"` |
 | Longline | 12, 13, 21 | `n_hooks` (`fj_kroka`) | `duration_m / (60 × 24)` | `"hook-days"` |
 | Gillnet | 2, 3, 4, 5 | `n_nets` (`fj_dreginna_neta`) | `duration_m / (60 × 24)` | `"net-days"` |
 | Hand line | 14 | `n_jigs` (`fj_faera`) | `duration_m / 60` | `"jig-hours"` |
-| Traps | 16 | `n_units` (`fj_gildra`) | `duration_m / 60` from `difftime(t1, t0)` | `"trap-hours"` |
+| Traps | 16 | `n_units` (`fj_gildra`) | `duration_m / 60` from `difftime(t4, t1)` | `"trap-hours"` |
 | Purse seine | 10 | 1 | 1 | `"setting"` |
 
 **Towtime caps for `fs_afladagbok` mobile (hours):** Dragnót (11) → 4;

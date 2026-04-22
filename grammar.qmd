@@ -145,7 +145,7 @@ The station record captures the *envelope* of an entire event: where and when
 the vessel was occupied (`s1`/`s2`, `lon1`/`lat1`, `lon2`/`lat2`, `z1`/`z2`).
 The sample record captures a specific observational act nested inside that
 envelope — with its own instrument, method, and event-level timestamps
-(`t0`–`t3`).
+(`t1`–`t4`).
 
 A practical rule: if a value characterises the station as a whole, it belongs
 in the station table; if it belongs to a specific measurement act with its own
@@ -162,7 +162,7 @@ distinguished rather than silently overwritten.
 
 Time is similarly a boundary case. The station outer bounds `s1`/`s2` define
 the temporal envelope of the entire station. The event-level timestamps
-`t0`–`t3` are sample-level: they belong to the specific observational act
+`t1`–`t4` are sample-level: they belong to the specific observational act
 (fishing operation, CTD cast, etc.) nested within the station. Any
 finer-grained timing — sub-tow position fixes, sample-by-sample clock readings
 — belongs at the measurement level. Conflating levels leads to ambiguity when
@@ -201,10 +201,10 @@ Time columns follow a three-level naming convention that mirrors the hierarchy:
 |---|---|---|
 | Trip | `T1`, `T2` | Departure and landing times (uppercase T, numbered) |
 | Station | `s1`, `s2` | Outer time bounds of the station — derived as the minimum and maximum across all sample-level times at that station (lowercase s, numbered) |
-| Sample | `t0`, `t1`, `t2`, `t3` | Individual event timestamps within a fishing operation or other sample (lowercase t, zero-indexed) |
+| Sample | `t1`, `t2`, `t3`, `t4` | Individual event timestamps within a fishing operation or other sample (lowercase t, numbered 1–4) |
 
 In the common commercial case where each station contains exactly one fishing
-sample, `s1 = t0` and `s2 = t3` (or whichever of `t0`–`t3` are populated),
+sample, `s1 = t1` and `s2 = t4` (or whichever of `t1`–`t4` are populated),
 and the station outer bounds are redundant. They become necessary — and
 independently meaningful — when a station contains several concurrent sample
 types (e.g. a trawl haul and a CTD cast), each with its own time window.
@@ -249,8 +249,8 @@ the vessel was occupied, not *what* it was doing there.
 
 `s1` and `s2` are derived outer bounds whose exact values depend on which
 sample-level timestamps are populated. In the common single-fishing-sample
-case `s1` maps to whichever of `t0`–`t3` is earliest (typically `t0` for
-static gear, `t1` for mobile), and `s2` to whichever is latest.
+case `s1` maps to whichever of `t1`–`t4` is earliest (typically `t1` for
+both gear classes), and `s2` to whichever is latest.
 
 The spatial columns `lon1`/`lat1`, `lon2`/`lat2`, `z1`/`z2`, and `sq`/`ssq`
 play an analogous role to `s1`/`s2`: they describe the station's spatial and
@@ -295,10 +295,10 @@ or in close succession; each is a separate row in the sample table linked by
 | `.smid` | int | Sample identifier (primary key) |
 | `.sid` | int | Parent station (foreign key) |
 | `sample_type` | chr | Kind of observation (`"fishing"`, `"ctd"`, `"logger"`, …) |
-| `t0` | datetime | Sample start — earliest event in this sample |
-| `t1` | datetime | Second event (gear-class dependent; see below) |
-| `t2` | datetime | Third event (gear-class dependent) |
-| `t3` | datetime | Sample end — latest event in this sample |
+| `t1` | datetime | Sample start — gear deployment starts |
+| `t2` | datetime | Gear deployment ends (unrecorded for all current gear classes; `NA`) |
+| `t3` | datetime | Gear retrieval starts |
+| `t4` | datetime | Sample end — gear retrieval ends |
 
 ### The fishing sample *(first detailed sample type)*
 
@@ -306,21 +306,21 @@ Of the many possible sample types — fishing operations, hydrographic casts,
 biological net tows, acoustic transects, sediment grabs — the fishing sample
 is the first to be fully documented here, reflecting the current project focus
 on commercial fisheries logbooks. The structural principles established below
-(the `t0`–`t3` event sequence, gear-specific effort, the commercial collapse
+(the `t1`–`t4` event sequence, gear-specific effort, the commercial collapse
 pattern) serve as a template; documentation for other sample types will follow
 in later revisions of this document.
 
 A fishing sample is a single gear deployment from which catch is recorded. Its
-`t0`–`t3` timestamps and their gear-class-specific meanings are described in
+`t1`–`t4` timestamps and their gear-class-specific meanings are described in
 the subsection below; the full column set is:
 
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `gid` | int / chr | Gear type code |
-| `t0`, `t1`, `t2`, `t3` | datetime | Event timestamps (deployment → fishing start → fishing end → retrieval) |
-| `lon1`, `lat1` | dbl | Position at `t1` (fishing start / tow start) |
-| `lon2`, `lat2` | dbl | Position at `t2` (fishing end / tow end) |
+| `t1`, `t2`, `t3`, `t4` | datetime | Event timestamps (deployment start → deployment end → retrieval start → retrieval end) |
+| `lon1`, `lat1` | dbl | Position at `t2` (fishing start / tow start) |
+| `lon2`, `lat2` | dbl | Position at `t3` (fishing end / tow end) |
 | `z1`, `z2` | dbl | Depth at fishing start and end (m) |
 | `effort_count` | dbl | Count component of effort — gear-type-specific (hooks, nets, jigs, trap units; simultaneous gear count for mobile, default 1) |
 | `effort_duration` | dbl | Time component of effort — in the natural unit implied by `effort_unit` (derived from capped `duration_m`) |
@@ -334,7 +334,7 @@ specific operation performed, not the station as a location. At a station
 where a trawl haul and a CTD cast are made simultaneously, the CTD sample has
 no gear code; only the fishing sample does. Effort and its unit are likewise
 properties of the operation: they are calculated from the fishing sample's own
-timestamps (`t2 − t1`), hook counts, net counts, or trap units — none of
+timestamps (`t3 − t2`), hook counts, net counts, or trap units — none of
 which are station-envelope quantities.
 
 Gear-specific auxiliary quantities (number of hooks, nets, traps, sweeps
@@ -346,7 +346,7 @@ the relevant gear class, `NA` elsewhere.
 
 **Commercial logbook collapse.** In commercial logbook data there is typically
 exactly one fishing sample per station, so the sample level is not represented
-as a separate table in practice. All fishing-sample columns — `gid`, `t0`–`t3`,
+as a separate table in practice. All fishing-sample columns — `gid`, `t1`–`t4`,
 position, depth, `effort_count`, `effort_duration`, `effort_unit`, `effort`, `towtime`, `gear_width` — appear
 directly on the station record as denormalised columns. The grammar locates
 them at the sample level regardless of where they are physically stored;
@@ -355,166 +355,121 @@ the station table.
 
 ### The time structure of a fishing sample
 
-A fishing operation is a continuous physical process — gear enters the water,
-fish are caught, gear is retrieved — yet it is recorded as a *discrete* event
-with a small number of timestamps. Which timestamps are meaningful, and which
-can be non-overlapping across operations on the same vessel, depends entirely
-on the gear class.
+Any fishing operation — regardless of gear class — passes through four
+discrete physical events. The grammar labels these `t1` through `t4` in the
+order they occur. No single logbook system records all four for all gear
+types, but naming them consistently is essential for cross-gear comparisons,
+effort calculations, and joining vessel-tracking data to fishing activity.
 
-#### Mobile gear
+#### Event 1 — Gear deployment starts (`t1`)
 
-For mobile gears (bottom trawl, midwater trawl, seine, dredge), one operation
-must end before the next can begin: the vessel must retrieve its gear before
-redeploying. Operations are therefore strictly sequential. The full time
-structure of a single operation has four events:
+- *Static gear* (longline, gillnet, trap): First buoy enters the water.
+- *Mobile gear* (trawl, seine, dredge): Gear enters the water.
 
-| Event | Logbook column | Recorded? |
+#### Event 2 — Gear deployment ends (`t2`)
+
+- *Static gear*: Last buoy enters the water — the full gear is set and the
+  soak period begins.
+- *Mobile gear*: Gear reaches the bottom (or fishing depth for pelagic
+  trawls). This is the start of active fishing, the start of the effort
+  interval, and the point from which vessel-tracking positions are assigned
+  to the fishing operation.
+
+#### Event 3 — Gear retrieval starts (`t3`)
+
+- *Static gear*: First buoy leaves the water — hauling begins. This is the
+  point from which vessel-tracking positions are assigned to the fishing
+  operation.
+- *Mobile gear*: Gear leaves the bottom (or fishing depth). This is the end
+  of active fishing and the end of the effort interval; vessel-tracking
+  positions are no longer assigned to the fishing operation after this point.
+
+#### Event 4 — Gear retrieval ends (`t4`)
+
+- *Static gear*: Last buoy leaves the water. Vessel-tracking positions are no
+  longer assigned to the fishing operation after this point.
+- *Mobile gear*: Gear is fully out of the water.
+
+::: {.callout-note}
+**Soak time and hook-level variation (static gear).** There is no single
+"start of active fishing" at the gear level — each hook or mesh segment
+enters and leaves the water at a different time during the deployment and
+retrieval phases. Because retrieval typically takes longer than deployment,
+the first hook deployed also has the shortest individual soak time, and the
+last hook the longest. In principle a mean soak time per hook could be
+reconstructed from the four event times, but in practice it is the four
+gear-level timestamps that are recorded.
+:::
+
+#### The AIS location window
+
+Joining vessel-tracking (AIS) positions to a fishing operation requires
+knowing during which interval the vessel's position is informative about
+*where fishing occurred*. This interval differs between gear classes:
+
+- **Mobile gear:** The vessel tows the gear throughout `[t2, t3]`, so vessel
+  position equals gear position during the entire effort interval. The
+  location window is `[t2, t3]`.
+- **Static gear:** The gear fishes autonomously during the soak; the vessel
+  may be anywhere. The vessel is physically co-located with the gear only
+  during retrieval. The location window is therefore `[t3, t4]`.
+
+This asymmetry — the window shifts by one interval between gear classes — 
+creates awkwardness if AIS joins are written separately per gear class. The
+practical fix is to precompute two derived columns, `w1` and `w2`, once in
+`fishing_sample`:
+
+| | Mobile | Static |
 |---|---|---|
-| Gear deployment starts (gear enters water) | — | No |
-| **Fishing starts** (gear on bottom / tow begins) | **`t1`** | Yes |
-| **Fishing ends** (gear lifted / tow ends) | **`t2`** | Yes |
-| Gear fully retrieved (gear back on deck) | — | No |
+| `w1` (location window start) | `t2` | `t3` |
+| `w2` (location window end) | `t3` | `t4` |
 
-The deployment and retrieval intervals bracketing `t1` and `t2` are short
-relative to tow duration and are not recorded in practice. What matters for
-analysis is `t2 − t1`: the tow time, which is the primary effort unit for
-mobile gears and the basis for swept-area calculations.
+All downstream AIS joins then operate uniformly on `[w1, w2]`, with the
+gear-class logic encapsulated in one place.
 
-The key non-overlap constraint is simple: no two operations on the same vessel
-can have overlapping `[t1, t2]` intervals. A vessel can only tow one set of
-gear at a time, so any two operations where `t1`/`t2` windows overlap is a
-data error.
+#### Effort duration
 
-#### Static gear
+The theoretically correct effort interval is `t3 − t2` for all gear classes:
+deployment-end to retrieval-start. For mobile gear both events are usually
+recorded and the interval is exact. For static gear `t2` (last hook in) is
+rarely recorded; soak time is therefore approximated as `t3 − t1` — the
+interval from first-hook-in to first-hook-hauled — which overestimates true
+soak time by the deployment duration `t2 − t1`.
 
-Static gears (longline, gillnet, trap) operate fundamentally differently. Once
-deployed, gear fishes autonomously for hours or days while the vessel is free
-to move elsewhere. A vessel can therefore have several sets of gear in the
-water simultaneously — gear A soaking while gear B is being deployed, gear C
-being retrieved while gear A continues to soak. The outer `[t0, t2]` windows
-of concurrent operations legitimately overlap.
+#### Non-overlap constraints
 
-The full time structure of a single static-gear operation has five events
-(using the grammar labels introduced in the next subsection):
-
-| Event | Grammar label | Recorded? |
-|---|---|---|
-| **Gear deployment starts** (first hook / net in water) | **`t0`** | Yes |
-| Gear deployment ends (last hook / net in water) | `t1` | Rarely |
-| [Soak period — gear fishing autonomously] | — | — |
-| **Gear retrieval starts** (first hook / net hauled) | **`t2`** | Yes |
-| **Gear retrieval ends** (last hook / net on board) | **`t3`** | Yes |
-
-The deployment-end timestamp `t1` is almost never recorded; the deployment
-phase is treated as instantaneous in most logbook systems. This is an
-acknowledged gap: for a vessel setting 2,000 hooks at 1 knot, the deployment
-alone may take two hours, and the unrecorded `t1` can differ substantially
-from `t0`.
-
-The non-overlap constraints for static gear are more subtle than for mobile
-gear. Two constraints hold that cannot be violated physically:
-
-- **Deployment windows** `[t0, t1]` cannot overlap across concurrent
-  operations — a vessel can only be in one place setting gear at a time.
-- **Retrieval windows** `[t2, t3]` cannot overlap across concurrent
-  operations — a vessel can only be hauling one set of gear at a time.
-
-But the *outer* interval `[t0, t3]` of two operations on the same vessel *can*
-overlap legitimately: deploying a new longline while an older one soaks is
-normal practice. The timeline below illustrates a typical two-operation
-sequence:
+Deployment windows `[t1, t2]` cannot overlap across concurrent operations on
+the same vessel; a vessel can only be in one place setting gear at a time.
+Retrieval windows `[t3, t4]` cannot overlap either. The *outer* interval
+`[t1, t4]` of two operations *can* overlap legitimately for static gear —
+deploying a new longline while an older one soaks is normal practice:
 
 ```
-Operation A:  t0_A ── t1_A · · · · · · · · · t2_A ── t3_A
-Operation B:               t0_B ── t1_B · · · · · · · · · t2_B ── t3_B
+Operation A:  t1_A ── t2_A · · · · · · · · · t3_A ── t4_A
+Operation B:               t1_B ── t2_B · · · · · · · · · t3_B ── t4_B
 ```
 
-Here operation B's deployment begins after A's deployment ends but before A's
-retrieval begins. The outer `[t0, t3]` windows overlap; the `[t0, t1]` and
-`[t2, t3]` windows do not.
+The correct data-quality checks are therefore:
 
-This has a direct consequence for data quality checking. A check that flags
-any two operations on the same vessel with overlapping `[t0, t3]` intervals
-will produce false positives for static gear. The correct checks are:
-
-- `t0 < t2 < t3` must hold within every individual operation (with `t1`
-  between `t0` and `t2` when recorded).
-- No two operations on the same vessel share an overlapping `[t2, t3]`
+- `t1 < t2 < t3 < t4` must hold within every individual operation (with `t2`
+  between `t1` and `t3` when recorded).
+- No two operations on the same vessel share an overlapping `[t3, t4]`
   retrieval window.
-- No two operations on the same vessel share an overlapping `[t0, t1]`
-  deployment window — but since `t1` is rarely recorded, this check is
-  limited in practice to detecting identical `t0` timestamps.
+- No two operations on the same vessel share an overlapping `[t1, t2]`
+  deployment window — but since `t2` is rarely recorded for static gear,
+  this check is limited in practice to detecting identical `t1` timestamps.
 
-#### A unified time convention: t0 – t3
+A check that flags any two operations with overlapping `[t1, t4]` outer
+windows will produce false positives for static gear and should not be used.
 
-The preceding discussion used labels that differ between gear classes —
-`t1`/`t2` for mobile, `t0`/`t2`/`t3` for static. A grammar should not require
-consulting the gear type before interpreting a column name. The four physical
-events of any fishing operation map cleanly onto a single sequence:
-
-| Label | Event | Mobile gear | Static gear |
-|---|---|---|---|
-| `t0` | Gear deployment starts | Warp / net enters water | First hook / net enters water |
-| `t1` | Gear deployment ends — fishing begins | Gear on bottom, tow begins | Last hook / net in water, soaking begins |
-| `t2` | Fishing ends — gear retrieval starts | Gear lifted off bottom | First hook / net hauled |
-| `t3` | Gear retrieval ends | Gear back on deck | Last hook / net on board |
-
-Under this convention the effort quantity of primary interest — active fishing
-time — is consistently `t2 − t1` regardless of gear class. `t1 − t0` is always
-deployment duration; `t3 − t2` is always retrieval duration.
-
-The non-overlap constraints from the previous sections state uniformly for all
-gear types: `[t0, t1]` windows cannot overlap across concurrent operations;
-`[t2, t3]` windows cannot overlap; `[t0, t3]` outer windows can overlap for
-static gear only.
-
-##### What is typically recorded
-
-No data system records all four events for all gear types. The practical
-coverage is:
+#### What is typically recorded
 
 | Label | Mobile gear | Static gear |
 |---|---|---|
-| `t0` | Rarely | Usually |
-| `t1` | Usually | Rarely |
-| `t2` | Usually | Usually |
-| `t3` | Rarely | Usually |
-
-For mobile gear the effort calculation depends on `t2 − t1` (tow time), so
-`t1` and `t2` are the primary events; `t0` and `t3` bracket the tow but are
-not needed for effort. For static gear, soak time (`t2 − t1`) is the
-theoretically correct effort measure, but since `t1` (deployment end) is
-rarely recorded, soak time is commonly approximated as `t2 − t0` — the
-interval from first-hook-in to first-hook-hauled — which overestimates true
-soak time by the deployment duration.
-
-##### Resetting the Icelandic vocabulary
-
-The Icelandic logbook systems (`afli`, `fs_afladagbok`) use a `t0`/`t1`/`t2`
-convention that predates this grammar. The mapping to grammar labels is:
-
-| Icelandic label | Mobile gear meaning | Grammar label | Static gear meaning | Grammar label |
-|---|---|---|---|---|
-| `t0` | — (not used) | — | Deployment starts | `t0` ✓ |
-| `t1` | Tow starts | `t1` ✓ | Retrieval starts | `t2` ✗ |
-| `t2` | Tow ends | `t2` ✓ | Retrieval ends | `t3` ✗ |
-
-For mobile gear the Icelandic labels happen to coincide with the grammar.
-For static gear they do not: the Icelandic `t1` means retrieval starts
-(grammar `t2`), and the Icelandic `t2` means retrieval ends (grammar `t3`).
-The event grammar calls `t1` (deployment ends) has no Icelandic label because
-it is not recorded.
-
-A reset to grammar conventions would require, **for static gear only**:
-
-- Rename current `t1` → `t2` (retrieval starts)
-- Rename current `t2` → `t3` (retrieval ends)
-- Add `t1` as a new column for deployment end — currently unrecorded and
-  therefore `NA` throughout, but named consistently with mobile gear
-
-No changes are needed for mobile gear columns. After the reset, the time
-columns carry the same meaning across all gear types: a reader can interpret
-`t0`–`t3` without consulting `gid`.
+| `t1` | Rarely | Usually |
+| `t2` | Usually | Rarely |
+| `t3` | Usually | Usually |
+| `t4` | Rarely | Usually |
 
 ### Other sample types
 
@@ -523,7 +478,7 @@ observation is made at the same station:
 
 - A scientific survey tow may record both a catch sample (species composition
   and weight) and a series of hydrographic casts (CTD profiles) at the same
-  station position. These are two distinct samples with their own `t0`/`t3`
+  station position. These are two distinct samples with their own `t1`/`t4`
   bounds.
 - Continuous electronic logger data — position, speed, heading, net opening,
   depth — recorded during a tow constitute a third type of sample: a time
@@ -675,7 +630,7 @@ schema.
 | `z1`, `z2` | Station | Depth bounds (envelope — depth at `s1`/`s2`) |
 | `sq`, `ssq` | Station | Statistical square / sub-square (derived from position) |
 | `gid` | (Fishing) Sample | Gear type code |
-| `t0`, `t1`, `t2`, `t3` | (Fishing) Sample | Deployment start / fishing start / fishing end / retrieval end |
+| `t1`, `t2`, `t3`, `t4` | (Fishing) Sample | Deployment start / deployment end / retrieval start / retrieval end |
 | `effort_count` | (Fishing) Sample | Count component of effort (hooks, nets, jigs, trap units, or simultaneous gear count for mobile) |
 | `effort_duration` | (Fishing) Sample | Time component of effort (in the natural unit for each gear type; derived from capped `duration_m`) |
 | `effort_unit` | (Fishing) Sample | Unit of the product (e.g. `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"setting"`) |
@@ -693,7 +648,7 @@ Three naming conventions are worth making explicit:
   `.checks`).
 - **Three-level time convention** makes the temporal hierarchy unambiguous at
   a glance: uppercase `T1`/`T2` are trip bounds; lowercase `s1`/`s2` are
-  station outer bounds (derived from sample times); lowercase `t0`–`t3` are
+  station outer bounds (derived from sample times); lowercase `t1`–`t4` are
   sample-level event timestamps (defined in detail for fishing samples; the
   same sequence applies to other sample types as appropriate).
 - **Numeric suffix** on paired columns (`lon1`/`lon2`, `lat1`/`lat2`,
@@ -789,8 +744,8 @@ primary data source.
 
 **Option B — Synthetic stations and trips for aggregate records.** Each row in
 an aggregate table can be treated as a pseudo-station: a synthetic `.sid` is
-assigned; `lon1`/`lat1` are set to the ICES rectangle centroid; `t1` is the
-first day of the month and `t2` the last (or both are left `NA`); effort is
+assigned; `lon1`/`lat1` are set to the ICES rectangle centroid; `t2` is the
+first day of the month and `t3` the last (or both are left `NA`); effort is
 taken directly from the recorded total. A synthetic `.tid` is likewise
 assigned — one per (vessel, month) combination when vessel is known, one per
 aggregate row otherwise. This preserves the single-table grammar and allows
@@ -889,8 +844,8 @@ catch distribution step would be needed. The catch would already be attributed
 to a precise time and place.
 
 The high-resolution Icelandic data illustrates what the EU data is trying to
-approximate. A bottom trawler with full electronic logbook coverage has `t1`,
-`t2`, `lon1`/`lat1`, `lon2`/`lat2` for every haul: the station table is
+approximate. A bottom trawler with full electronic logbook coverage has `t2`,
+`t3`, `lon1`/`lat1`, `lon2`/`lat2` for every haul: the station table is
 complete. The same vessel operating under EU reporting requirements would
 produce a single eflalo row for the day, and a reconstructed station table
 derived from VMS pings would be the best available substitute. The grammar
@@ -913,7 +868,7 @@ station boundaries.
 | **Station concept** | Individual fishing operation | Individual fishing operation | Individual fishing operation | Aggregate: trip × gear × day × rectangle |
 | **Gear code** | Legacy integer (old) | New integer (canonical) | New integer (derived) | ICES metier string (e.g. `OTB`, `LLS`) |
 | **Spatial resolution** | GPS (metres) | GPS (metres) | GPS (variable quality) | ICES rectangle (~50 km) |
-| **Temporal resolution** | Minutes (on-bottom clock) | Minutes (electronic timestamps) | Minutes (electronic timestamps) | Day (`LE_CDAT`); rarely `t1`/`t2` |
+| **Temporal resolution** | Minutes (on-bottom clock) | Minutes (electronic timestamps) | Minutes (electronic timestamps) | Day (`LE_CDAT`); rarely `t2`/`t3` |
 | **Catch format** | Long | Long | Long | Wide (`LE_KG_<SP>` columns) |
 
 The gear code unification for the Icelandic schemas is handled by

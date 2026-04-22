@@ -5,6 +5,12 @@ date: 2026-04-11
 
 ## Overview
 
+> **Note on time column naming:** Code examples in this document use the old
+> `t0`/`t1`/`t2` convention that was in place at the time these bugs were
+> discovered. The convention has since been reset to `t1`–`t4` (see
+> `grammar.qmd` §5.2). The bugs and fixes described here are unchanged; only
+> the column names differ in current scripts.
+
 Both `scripts/01_adb_convert.R` and `scripts/01_fs_afladagbok_convert.R` shared
 two bugs that caused a large fraction of fishing stations to be silently dropped
 from the output `station.parquet` files.  The bugs were identified by comparing

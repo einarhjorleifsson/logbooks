@@ -106,16 +106,16 @@ aux_seine <-
 
 ## Timing ----------------------------------------------------------------------
 # Event timestamps and soak/tow duration from each aux table.
-# Grammar convention for static gear: Icelandic t1 (retrieval start) → t2;
-# Icelandic t2 (retrieval end) → t3. t1 (deployment end) is unrecorded for
-# static gear. Mobile gear uses t1 (tow start) and t2 (tow end) as-is.
+# Grammar (t1–t4): static gear t1=deployment start, t3=retrieval start,
+# t4=retrieval end; t2 (deployment end) is unrecorded (NA) for all gears.
+# Mobile gear: t2=tow start (derived from hhmm), t3=tow end (t2+duration_m).
 timing <-
   bind_rows(
     aux_mobile |> select(.sid, hhmm, duration_m),
     aux_static |>
       mutate(duration_m = case_when(!is.na(duration_d) ~ duration_d * 24 * 60,
                                     !is.na(duration_h) ~ duration_h * 60)) |>
-      select(.sid, t0, t2 = t1, t3 = t2, duration_m),
+      select(.sid, t1, t3, t4, duration_m),
     aux_trap   |> select(.sid, duration_m),
     aux_seine  |> select(.sid, hhmm)
   ) |>
@@ -246,35 +246,36 @@ fishing_sample <-
 
 
 ## Timestamps ------------------------------------------------------------------
-# Mobile: derive t1 from hhmm when absent; derive t2 from t1 + duration_m.
-# Static: t2/t3 come from data; t1 is never recorded (remains NA).
+# Mobile: derive t2 (tow start) from hhmm when absent; derive t3 (tow end)
+# from t2 + duration_m. t2 = deployment end is unrecorded for all gears (NA).
+# Static: t3/t4 come from data; t2 is never recorded (remains NA).
 fishing_sample <- fishing_sample |>
-  mutate(t1 = NA_POSIXct_) |>
-  mutate(.t1_source = if_else(!is.na(t1), "data", "derived"),
-         .t2_source = if_else(!is.na(t2), "data", "derived"),
+  mutate(t2 = NA_POSIXct_) |>
+  mutate(.t2_source = if_else(!is.na(t2), "data", "derived"),
+         .t3_source = if_else(!is.na(t3), "data", "derived"),
          duration_m = if_else(duration_m <= 0, NA_real_, duration_m),
          hhmm = if_else(!is.na(hhmm) & hhmm >= 100, hhmm, NA_real_),
          hh   = as.integer(hhmm %/% 100),
          hh   = if_else(hh < 24, hh, NA_integer_),
          mm   = as.integer(hhmm %% 100),
          mm   = if_else(mm < 60 & !is.na(hh), mm, NA_integer_),
-         t1   = case_when(!is.na(t1)              ~ t1,
+         t2   = case_when(!is.na(t2)              ~ t2,
                           !is.na(hh) & !is.na(mm) ~ as_datetime(date) + hours(hh) + minutes(mm)),
-         t2   = case_when(!is.na(t2)                        ~ t2,
-                          !is.na(t1) & !is.na(duration_m)   ~ t1 + minutes(as.integer(duration_m)))) |>
+         t3   = case_when(!is.na(t3)                        ~ t3,
+                          !is.na(t2) & !is.na(duration_m)   ~ t2 + minutes(as.integer(duration_m)))) |>
   select(-c(hhmm, hh, mm))
 
 
 ## Overlap QC ------------------------------------------------------------------
-# Nullify t1/t2 for operations whose windows overlap a neighbour on the same
-# vessel. Effectively applies to mobile gear only — static-gear t1 is NA so
+# Nullify t2/t3 for operations whose windows overlap a neighbour on the same
+# vessel. Effectively applies to mobile gear only — static-gear t2 is NA so
 # those rows pass through with no change.
 fishing_sample <- fishing_sample |>
   inner_join(trip |> select(.tid, vid) |> distinct(), by = ".tid") |>
-  arrange(vid, date, t1) |>
-  osfd::fd_flag_time_overlaps(t1, t2, by = vid) |>
-  mutate(t1 = if_else(.checks != "ok", NA, t1),
-         t2 = if_else(.checks != "ok", NA, t2)) |>
+  arrange(vid, date, t2) |>
+  osfd::fd_flag_time_overlaps(t2, t3, by = vid) |>
+  mutate(t2 = if_else(.checks != "ok", NA, t2),
+         t3 = if_else(.checks != "ok", NA, t3)) |>
   select(-vid)
 
 
@@ -375,8 +376,8 @@ if (FALSE) {
     facet_wrap(~ gear, scales = "free") +
     scale_fill_brewer(palette = "Set1")
 
-  ## t1/t2 source breakdown ----------------------------------------------------
-  fishing_sample |> count(.t1_source, .t2_source)
+  ## t2/t3 source breakdown ----------------------------------------------------
+  fishing_sample |> count(.t2_source, .t3_source)
 
   fishing_sample |>
     ggplot(aes(duration_m / 60, fill = .t1_source)) +

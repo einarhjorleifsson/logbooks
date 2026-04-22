@@ -122,10 +122,17 @@ afli_toga <- tibble::tribble(
 ## afli.lineha -----------------------------------------------------------------
 afli_lineha <- tibble::tribble(
   ~clean,                ~messy,              ~level,   ~sample_type,
-  ### time — sample events (grammar t0–t2 for static gear) --------------------
-  "t0",                  "logn_hefst",        "sample",  "fishing", # gear deployment starts
-  "t1",                  "drattur_hefst",     "sample",  "fishing",  # retrieval starts
-  "t2",                  "drattur_lykur",     "sample",  "fishing",  # retrieval ends
+  ### time — sample events -------------------------------------------------------
+  # Grammar: four events per fishing operation, t1–t4 in order of occurrence:
+  #   t1 = gear deployment starts (Event 1) — first buoy / hook / warp in water
+  #   t2 = gear deployment ends  (Event 2) — UNRECORDED; added as NA in convert script
+  #   t3 = gear retrieval starts (Event 3) — first buoy / hook hauled
+  #   t4 = gear retrieval ends   (Event 4) — last buoy / hook on board
+  # For mobile gear t4 is also unrecorded (NA). Effort = t3 − t2; approximated
+  # as t3 − t1 when t2 is absent (i.e. always currently).
+  "t1",                  "logn_hefst",        "sample",  "fishing", # Event 1: gear deployment starts
+  "t3",                  "drattur_hefst",     "sample",  "fishing", # Event 3: gear retrieval starts (t2 unrecorded)
+  "t4",                  "drattur_lykur",     "sample",  "fishing", # Event 4: gear retrieval ends
   ### duration (effort) --------------------------------------------------------
   "duration_d",          "naetur",            "sample",  "fishing",  # soak time (days)
   "duration_h",          "klst",              "sample",  "fishing",  # soak time (hours)
@@ -187,9 +194,10 @@ adb <- tibble::tribble(
   # station_v.parquet
   ".sid",  "station_id",        "adb",
   "gid",   "gear_no",           "adb",
-  "t0",    "fishing_start",     "adb",    # gear deployment (static)
-  "t1",    "tow_start",         "adb",    # hauling starts
-  "t2",    "fishing_end",       "adb",    # hauling ends / deployment ends
+  # time — sample events (grammar t1–t4; see afli_lineha comment for full definition)
+  "t1",    "fishing_start",     "adb",    # Event 1: gear deployment starts
+  "t3",    "tow_start",         "adb",    # Event 3: gear retrieval starts (t2 unrecorded)
+  "t4",    "fishing_end",       "adb",    # Event 4: gear retrieval ends
   "lon1",  "longitude",         "adb",    # already decimal degrees — wrong convertion in many cases
   "lat1",  "latitude",          "adb",    # already decimal degrees — wrong convertion in many cases
   "lon2",  "longitude_end",     "adb",    # already decimal degrees — wrong convertion in many cases
@@ -215,9 +223,10 @@ fs_afladagbok <- tibble::tribble(
   # ws_veidi.parquet (stations)
   #".sid",   "veidi_id",
   "gid",    "veidarfaeri_id",
-  "t0",     "upphaf_timi",           # gear deployment (static)
-  "t1",     "milli_timi",            # hauling starts
-  "t2",     "lok_timi",              # hauling ends / deployment ends
+  # time — sample events (grammar t1–t4; see afli_lineha comment for full definition)
+  "t1",     "upphaf_timi",           # Event 1: gear deployment starts
+  "t3",     "milli_timi",            # Event 3: gear retrieval starts (absent for OTB/OTM/DRB → NA)
+  "t4",     "lok_timi",              # Event 4: gear retrieval ends
   "x1",     "upphaf_lengd",
   "y1",     "upphaf_breidd",
   "x2",     "lok_lengd",

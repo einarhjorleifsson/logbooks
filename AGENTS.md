@@ -72,7 +72,7 @@ Full column tables, effort units, and merge details in `AGENTS_output_schema.md`
 Four output tables per schema:
 - `trip.parquet` — one row per voyage (`.tid`, `vid`, `T1`, `hid1`, `T2`, `hid2`, `n_crew`, `source`, `schema`)
 - `station.parquet` — narrow spatial/temporal envelope (`.sid`, `.tid`, `date`, `lon1/lat1/lon2/lat2`, `z1/z2`, `schema`)
-- `fishing_sample.parquet` — gear and effort detail, 1:1 with station (`.sid`, `.tid`, `gid`, `gid_old`, `gear`, `target2`, `t0`–`t3`, `duration_m`, effort columns, gear dims `g_mesh/g_width/g_length/g_height`, `back_entry`, `schema`)
+- `fishing_sample.parquet` — gear and effort detail, 1:1 with station (`.sid`, `.tid`, `gid`, `gid_old`, `gear`, `target2`, `t1`–`t4`, `duration_m`, effort columns, gear dims `g_mesh/g_width/g_length/g_height`, `back_entry`, `schema`)
 - `catch.parquet` — one row per species per station (`.sid`, `sid`, `catch`)
 
 Effort is two-component: `effort = effort_count × effort_duration`. Units vary
@@ -150,7 +150,7 @@ run in parallel with `tar_make(workers = N)`.
 1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Mathematical recovery documented in `wacky_recovery.qmd`. AIS-based recovery implemented in `scripts/01_siritar.R` (interpolates AIS ground-truth positions; in progress — see bugs listed above).
 2. **Erroneous timestamps** — year-1899 and year-2090s entries in `rafr_sjalfvirkir_maelar`; likely Oracle null/default date values.
 3. **Historical back-entries** — 95,743 stations (~1.7%) have pre-1980 dates but `.sid > 2.5M`, indicating retrospective digitisation long after the fishing events. Flagged as `back_entry = TRUE` in `fishing_sample.parquet`. Genuine contemporaneous early records (blocks 1–2, `.sid` ≤ 2.34M, 1969–1979) are left as `FALSE`. No random date-entry typos found at scale; all anomalous date clusters are organised multi-vessel batches with catch data. See `afli-backentry.qmd` for full derivation.
-4. **Residual t0 ≤ t2 violations** — small number in `afli` (negative-.sid garbage records). Filter `.sid > 0` before timing-sensitive analyses.
+4. **Residual t1 ≤ t4 violations** — small number in `afli` (negative-.sid garbage records). Filter `.sid > 0` before timing-sensitive analyses.
 5. **DRB duration suspiciously short** — `fs_afladagbok` DRB median ~18 min; may reflect how `upphaf_timi`/`lok_timi` are populated for plow gear. Not investigated.
 6. **~54k OTB stations (2021–2022) with no `ws_dragnot_varpa` record** — `effort_unit = NA` for those rows; source completeness gap in `fs_afladagbok`.
 7. **`eytt_deleted` records (327 stations)** — 16,912 `rafr_stofn` records have `eytt = 1` (officially deleted in Oracle); 327 passed through into `data/afli/station.parquet` and `fishing_sample.parquet`. Flagged as `eytt_deleted = TRUE` in both tables. `rafr_*` era records have `eytt_deleted = FALSE`; paper-era and Phase 4 direct-load records have `eytt_deleted = NA`. See `afli-tables.qmd` #sec-artefacts.
@@ -164,7 +164,7 @@ run in parallel with `tar_make(workers = N)`.
 - [ ] **Characterise AIS coverage gaps** — `approx(..., rule = 1)` produces NA lon/lat where AIS does not bracket GPS timestamps; quantify how many sensor records end up with NA positions.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` — classify Flotvarpa (`ws_veidi`) rows by `uppruni` to separate decimal-degree from DMS sources.
 - [ ] **Confirm longline `effort_count` semantics** — is `fj_kroka` the total hook count (`onglar × bjod` aggregated) or number of lines? Treat hook-day values as approximate until confirmed.
-- [ ] **Align static-gear time columns with grammar convention** — grammar uses `t0`–`t3`; `afli` convert script already renames static-gear `t1`→`t2`, `t2`→`t3`; `fs_afladagbok` uses `t0`/`t2` for all gears (t1 absent for trawls). Full t0–t3 alignment across both scripts is deferred.
+- [x] **t0–t3 → t1–t4 reset completed (2026-04-22)** — all convert scripts, dictionary, grammar.qmd, merge.qmd, AGENTS_output_schema.md updated. `t2` (deployment end) is `NA` throughout; `t4` (retrieval end) is `NA` for mobile gear.
 - [ ] **Fix DRB `effort_count` in `01_afli_convert.R`** — `n_units` for DRB in `afli` is `NA` through 2011 and `0` from 2012 onward (never a meaningful count); `coalesce(as.integer(n_units), 1L)` currently produces `effort_count = 0` for the post-2011 rows. Hardcode to `1L` as for OTB/OTM.
 
 
@@ -174,7 +174,7 @@ run in parallel with `tar_make(workers = N)`.
 - [x] `rafr_` vs `stofn` strategic review (2026-04-22) — confirmed master tables are authoritative; `rafr_*` adds only XML provenance; two negative-visir pathways documented (rafr_ 2003–2020, direct-load 2020–2022); `eytt_deleted` flag added to `station` and `fishing_sample` outputs; `afli-tables.qmd` updated with Phase 4 and hand-editing sections
 - [x] `grammar.qmd` updated (2026-04-21) — sensor layer section added (station supplement vs time-series distinction; multi-table, multi-resolution pattern; NMEA foreshadowing); parallel-projects extension added (landings, surveys, continuous underway); landings section reframed as parallel-project prototype
 - [x] `scripts/01_afli_convert.R` audited, fixed, and rewritten (2026-04-11/20) — produces `trip`, `station`, `fishing_sample`, `sensor`, `catch`; gear dims renamed to `g_*` prefix
-- [x] `scripts/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t2−t0` for all time-based gears
+- [x] `scripts/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t4−t1` for all time-based gears
 - [x] `scripts/02_merge.R` refactored to two-tier (2026-04-20) — adb dropped; `fishing_sample` added to merge; 7,260,215 stations, 1,831,690 trips, 16,782,743 catch rows
 - [x] `merge.qmd` rewritten (2026-04-20) — two-tier afli + fs_afladagbok; timing analysis in fishing_sample; coverage, timing quality, catch sections
 - [x] `_targets.R` created (2026-04-12) — 12 targets, 4 tiers, parallelisable Tier-1
