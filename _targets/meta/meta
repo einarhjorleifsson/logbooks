@@ -1,14 +1,15 @@
 name|type|data|command|depend|seed|path|time|size|bytes|format|repository|iteration|parent|children|seconds|warnings|error
-translate_names|function|cad4dbb81450255e
-script_fs|stem|44a797e350ee4f3a|f2583bd5616bb2ef|2c530c1562a7fbd1|-1917508048|scripts/01_fs_afladagbok_convert.R|t20555.538860562s|s12941b|12941|file|local|vector|||0.32||
-script_afli|stem|1208ed96fc961ae5|1fbcbf58756b81e4|2c530c1562a7fbd1|-1154471632|scripts/01_afli_convert.R|t20554.8259311136s|s7890b|7890|file|local|vector|||0||
-script_merge|stem|7bab1699ae7ea48d|c8aebfc35e8dd885|2c530c1562a7fbd1|1665008539|scripts/02_merge.R|t20555.4683868999s|s6175b|6175|file|local|vector|||0||
 script_gear|stem|ecd2af451703a39d|cd8bbcde13fda584|2c530c1562a7fbd1|-10514089|data-raw/DATASET_gear-codes.R|t20555.4639503842s|s7976b|7976|file|local|vector|||0||
-script_dict|stem|3aa2b6078dbf2510|82fbd5ea0dfa7c46|2c530c1562a7fbd1|-1631007368|data-raw/DATASET_dictionary.R|t20554.6073523936s|s6986b|6986|file|local|vector|||0||
 script_adb|stem|66ce4ab9f8e3deec|83d3751d3538f932|2c530c1562a7fbd1|-555539656|scripts/01_adb_convert.R|t20555.3901120032s|s5299b|5299|file|local|vector|||0||
 gear_mapping_file|stem|a671681393d2cdb4|40e432bc2049f14f|4ecf720aa61235ae|-1109449786|data/gear/gear_mapping.parquet|t20555.5778325418s|s2706b|2706|file|local|vector|||2.47||
-dictionary_file|stem|e9fa1006a4334a64|1c4e12a81bd47112|8f431303a0661c76|-717516249|data/dictionary.parquet|t20555.5778400484s|s2013b|2013|file|local|vector|||0.009||
-fs_files|stem|c573e763447aabab|6ea8bcca89be9fe4|bb0a37aa5fac6c91|439870336|data/fs_afladagbok/trip.parquet*data/fs_afladagbok/station.parquet*data/fs_afladagbok/catch.parquet|t20555.5778815828s|s26063817b|26063817|file|local|vector|||3.584||
-afli_files|stem|4f5de3cd08fc3f86|d40d35a4faf4bb19|d15177d5a498140a|1977267884|data/afli/trip.parquet*data/afli/station.parquet*data/afli/catch.parquet|t20555.5789479712s|s259991774b|259991774|file|local|vector|||92.108||
-adb_files|stem|5af9b3e2dfd053f5|7d1b87915c08badd|00504132c7e6637f|-668281444|data/adb/trip.parquet*data/adb/station.parquet*data/adb/catch.parquet|t20555.5790053135s|s33990707b|33990707|file|local|vector|||4.888||
-merged_files|stem|9f3ade534729b5d7|123f3d248f1028a4|ad699d2cc58778e2|468551765|data/merged/trip.parquet*data/merged/station.parquet*data/merged/catch.parquet|t20555.5791729927s|s291655561b|291655561|file|local|vector|||14.471|Detected an unexpected many-to-many relationship between `x` and `y`. ℹ Row 19052 of `x` matches multiple rows in `y`. ℹ Row 646790 of `y` matches multiple rows in `x`. ℹ If a many-to-many relationship is expected, set `relationship =   'many-to-many'` to silence this warning.|
+script_dict|stem|107a4718bdda8ee9|82fbd5ea0dfa7c46|2c530c1562a7fbd1|-1631007368|data-raw/DATASET_dictionary.R|t20563.7212767048s|s15290b|15290|file|local|vector|||0||
+dictionary_file|stem|97ecc31a007575e9|1c4e12a81bd47112|9755668a051e0dcb|-717516249|data/dictionary.parquet|t20564.5640368223s|s3760b|3760|file|local|vector|||0.016||
+adb_files|stem|5af9b3e2dfd053f5|7d1b87915c08badd|3b68a604312c3835|-668281444|data/adb/trip.parquet*data/adb/station.parquet*data/adb/catch.parquet|t20564.5655237347s|s33990707b|33990707|file|local|vector|||16.126||
+script_merge|stem|d7c41a10f16b6254|c8aebfc35e8dd885|2c530c1562a7fbd1|1665008539|scripts/02_merge.R|t20564.6914976762s|s5182b|5182|file|local|vector|||0||
+match_nearest_date|function|3b8295e167f4601f
+translate_names|function|cad4dbb81450255e
+script_fs|stem|e5739b56149803a3|f2583bd5616bb2ef|2c530c1562a7fbd1|-1917508048|scripts/01_fs_afladagbok_convert.R|t20565.4162403782s|s15118b|15118|file|local|vector|||1.068||
+script_afli|stem|8921ccd030de25c3|1fbcbf58756b81e4|2c530c1562a7fbd1|-1154471632|scripts/01_afli_convert.R|t20565.4469178423s|s18316b|18316|file|local|vector|||0||
+fs_files|stem|dbabc3eb0083f731|6ea8bcca89be9fe4|1d31e7b3f2b1dbbe|439870336|data/fs_afladagbok/trip.parquet*data/fs_afladagbok/station.parquet*data/fs_afladagbok/catch.parquet|t20565.4540255944s|s19724391b|19724391|file|local|vector|||4.41||
+afli_files|stem|400026ad96cf48fc|d40d35a4faf4bb19|636a975fe7e951d1|1977267884|data/afli/trip.parquet*data/afli/station.parquet*data/afli/catch.parquet|t20565.4561502343s|s172458100b|172458100|file|local|vector|||183.563||
+merged_files|stem|7b8a0da4336df9ec|123f3d248f1028a4|282dc7e015b39ca2|468551765|data/merged/trip.parquet*data/merged/station.parquet*data/merged/catch.parquet|t20565.4563572532s|s195803004b|195803004|file|local|vector|||17.816||

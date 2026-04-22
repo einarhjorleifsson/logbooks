@@ -1,0 +1,261 @@
+---
+title: "Historical back-entries in afli/stofn"
+---
+
+## Background
+
+The `afli` schema (`stofn` table) covers Icelandic fisheries logbooks from
+approximately 1950 to the present, with ~6.9 million station records after
+removing [monthly aggregate records](afli-tables.qmd#aggregate-records).
+Because the system was introduced progressively — by gear type, by vessel, and
+by voluntary adoption — the earliest records raise an obvious question: which
+pre-1975 records are **genuine contemporaneous entries** and which are
+**retrospective back-entries** of historical data digitised long after the
+fishing events?
+
+This document traces the investigation and explains the derivation of the
+`back_entry` flag in `fishing_sample.parquet`.
+
+---
+
+## Setup
+
+```{r}
+library(whack)
+library(geo)
+library(tidyverse)
+library(nanoparquet)
+
+dictionary <- read_parquet("data/dictionary.parquet") |> filter(schema == "afli")
+
+source <-
+  read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+  wk_translate(dictionary)
+
+# Remove monthly aggregate records (see afli-tables.qmd)
+non_agg <- source |>
+  filter(
+    is.na(comment) |
+    (!comment %in% c("Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt",
+                     "Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt") &
+     !str_starts(comment, "Frá afli.gomul_dragnot, samantekt"))
+  )
+```
+
+---
+
+## Step 1 — Where does recording actually start?
+
+The first step is to look at the pre-1975 record count by gear type and date.
+
+```{r}
+#| fig-cap: "Pre-1975 station counts by gear. Each panel is one `gid` (gear code). The x-axis spans 1950–1975."
+non_agg |>
+  count(gid, date) |>
+  filter(year(date) < 1975) |>
+  ggplot(aes(date, n)) +
+  geom_point(size = 0.2) +
+  facet_wrap(~ gid, scales = "free_y") +
+  labs(x = NULL, y = "stations per day",
+       title = "Pre-1975 stations by gear (non-aggregate)")
+```
+
+The plot reveals two patterns:
+
+- **Most gear types show a clear recording onset around 1970–1972**, with volume
+  increasing steadily from there.
+- **Isolated points appear as far back as the early 1950s** — lone dots far from
+  the main data cloud.
+
+These isolated early points are the candidates for date entry errors or
+back-entries.
+
+---
+
+## Step 2 — Is `.sid` a proxy for data-entry time?
+
+In Oracle-based systems, primary keys are often drawn from a shared sequence
+that increments with each insert. If `.sid` tracks insertion order, a genuine
+old record should have a *low* `.sid`; a modern record with a mistyped year
+(or a retrospective batch insert) would have a *high* `.sid* paired with an
+old `date`.
+
+The plot below checks this for all records with `date < 1965`:
+
+```{r}
+#| fig-cap: "`.sid` value vs year(date) for all records with date before 1965. High `.sid` + old date = strong evidence of late entry."
+non_agg |>
+  filter(.sid > 0, !is.na(date), year(date) < 1965) |>
+  ggplot(aes(date, .sid)) +
+  geom_point(size = 0.8, alpha = 0.6) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  facet_wrap(~ gid, scales = "free") +
+  labs(x = "year(date)", y = ".sid",
+       title = "Pre-1965 records: date vs .sid",
+       subtitle = "High .sid + old date = likely late entry")
+```
+
+All three gear panels show `.sid` values in the **tens of millions** for dates
+in 1950–1964. Given that the main recording era (1973–2000) sits roughly in
+the 2M–50M `.sid` range, these records were clearly inserted long after the
+fishing events.
+
+---
+
+## Step 3 — Is the relationship between `.sid` and date broadly monotone?
+
+To see the full picture, we bin `.sid` into 200 equal-count quantile groups and
+plot the date distribution within each bin.
+
+```{r}
+#| fig-cap: "Date distribution by `.sid` quantile bin (200 bins). Black = median, grey ribbon = p05–p95, red = p01, blue = p99. A well-behaved contemporaneous system would show a smooth rising curve throughout."
+non_agg |>
+  filter(.sid > 0, !is.na(date)) |>
+  mutate(
+    sid_bin   = ntile(.sid, 200),
+    year_date = year(date)
+  ) |>
+  group_by(sid_bin) |>
+  summarise(
+    sid_med   = median(.sid),
+    yr_p01    = quantile(year_date, 0.01),
+    yr_p05    = quantile(year_date, 0.05),
+    yr_p50    = median(year_date),
+    yr_p95    = quantile(year_date, 0.95),
+    yr_p99    = quantile(year_date, 0.99),
+    .groups   = "drop"
+  ) |>
+  ggplot(aes(sid_med)) +
+  geom_ribbon(aes(ymin = yr_p05, ymax = yr_p95), alpha = 0.2) +
+  geom_line(aes(y = yr_p50)) +
+  geom_line(aes(y = yr_p01), colour = "firebrick", linewidth = 0.4) +
+  geom_line(aes(y = yr_p99), colour = "steelblue", linewidth = 0.4) +
+  scale_x_continuous(labels = scales::label_comma()) +
+  labs(x = ".sid", y = "year(date)",
+       title = "Date distribution by .sid bin",
+       subtitle = "Black = median · ribbon = p05–p95 · red = p01 · blue = p99")
+```
+
+The median (black) rises broadly with `.sid` — as expected. But the **red p01
+line shows a series of dips** at various `.sid` ranges: small clusters of
+records with dates far older than anything else in their bin. These are the
+back-entry batches.
+
+---
+
+## Step 4 — Characterising the pre-1980 blocks
+
+Filtering to all records with `date < 1980` and sorting by `.sid`, we group
+consecutive `.sid` values (gap < 5000) into blocks.
+
+```{r}
+pre80 <- non_agg |>
+  filter(.sid > 0, !is.na(date), year(date) < 1980) |>
+  arrange(.sid) |>
+  mutate(
+    sid_gap   = .sid - lag(.sid),
+    new_block = is.na(sid_gap) | sid_gap > 5000
+  ) |>
+  mutate(block_id = cumsum(new_block))
+
+catch_raw <- read_parquet("data-raw/data-dump/afli/afli.parquet")
+
+pre80 |>
+  group_by(block_id) |>
+  summarise(
+    n_station  = n(),
+    sid_min    = min(.sid),
+    sid_max    = max(.sid),
+    yr_min     = year(min(date)),
+    yr_max     = year(max(date)),
+    n_vid      = n_distinct(vid),
+    gids       = paste(sort(unique(gid)), collapse = ","),
+    .groups    = "drop"
+  ) |>
+  left_join(
+    catch_raw |>
+      filter(visir %in% (pre80 |> pull(.sid))) |>
+      count(visir) |>
+      left_join(pre80 |> select(.sid, block_id), by = c("visir" = ".sid")) |>
+      group_by(block_id) |>
+      summarise(n_catch_rows = sum(n), .groups = "drop"),
+    by = "block_id"
+  ) |>
+  mutate(
+    interpretation = case_when(
+      sid_max < 2500000                    ~ "genuine contemporaneous",
+      n_station < 100                      ~ "isolated (single-vessel)",
+      .default                             = "organised back-entry"
+    )
+  ) |>
+  knitr::kable(
+    col.names = c("Block", "n stations", ".sid min", ".sid max",
+                  "yr min", "yr max", "n vessels", "gids",
+                  "n catch rows", "Interpretation")
+  )
+```
+
+Key observations:
+
+- **Blocks 1–2** (`.sid` < 2.34M): Genuine contemporaneous records — Blocks 1
+  covers the earliest longline pioneers (1969–1979, 15 vessels); Block 2 is
+  the main trawl roll-out (1973–1979, 93 vessels, 338k stations).
+- **All other blocks** (`.sid` > 2.5M): Organised back-entries — deliberately
+  digitised historical data with catch records attached and multi-vessel
+  coverage. The largest are the shrimp batch (44k stations, gid 14) and the
+  multi-gear batch (13k stations, gids 1/2/5/7/8 going back to 1950).
+- **No evidence of random date-entry typos at any meaningful scale.** Every
+  cluster of anomalous dates is an organised retrospective batch.
+
+---
+
+## Step 5 — Why a data-driven flag fails
+
+Several algorithmic approaches were tested (bin-median, bin-p90, running
+maximum). All failed in at least one case because:
+
+1. Large back-entry blocks (e.g., 44k shrimp records) can dominate their `.sid`
+   bin, pulling the reference percentile toward the back-entry dates and
+   preventing detection.
+2. The `.sid` space is **not globally monotone with respect to date**: records
+   with `.sid` 200k–2M have dates from 1988–2019, so a running-max frontier
+   immediately overshoots and flags all subsequent blocks including the
+   genuine ones.
+
+---
+
+## The `back_entry` flag
+
+The flag uses the single clean boundary identified above:
+
+```r
+back_entry = !is.na(date) & year(date) < 1980 & .sid > 2500000
+```
+
+- **Genuine early records** (blocks 1–2, `.sid` ≤ 2.34M): correctly left as
+  `FALSE`.
+- **All 11 back-entry / isolated blocks** (`.sid` > 2.5M, pre-1980 dates):
+  correctly flagged `TRUE`.
+- **Post-1979 data**: `FALSE` by definition — no back-entry batches were
+  detected beyond 1979.
+
+Total records flagged: **95,743** (~1.7% of the station table).
+
+This flag is intended for sensitivity analyses. Analysts working on pre-1980
+time series should consider whether to include or exclude back-entered data,
+as completeness and precision may differ from contemporaneous records.
+
+---
+
+## Validation
+
+```{r}
+non_agg |>
+  filter(.sid > 0, !is.na(date)) |>
+  mutate(back_entry = !is.na(date) & year(date) < 1980 & .sid > 2500000) |>
+  count(back_entry, yr_range = if_else(year(date) < 1980, "pre-1980", "1980+")) |>
+  knitr::kable(col.names = c("back_entry", "era", "n"))
+```
+
+Zero post-1979 records are flagged (by construction); 338,957 genuine early
+pre-1980 records are correctly preserved as `FALSE`.

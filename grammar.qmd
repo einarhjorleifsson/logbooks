@@ -802,6 +802,36 @@ historical aggregates in their native form (Option A) and materialise synthetic
 stations only when feeding a downstream analysis tool that expects a station
 table.
 
+### A concrete case: monthly aggregates embedded in `afli/stofn`
+
+The `afli` schema illustrates a common real-world complication: aggregate
+records were stored in the *same table* as individual-operation records, with
+no structural separation — only a free-text `comment` field distinguishing them.
+Three batches are present:
+
+| `comment` value | Species group | `gid` | Records | Date range |
+|---|---|---|---|---|
+| `Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt` | Nephrops | 9 | 26,405 | 1960–1999 |
+| `Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt` | Shrimp | 14 | 12,708 | 1953–1986 |
+| `Frá afli.gomul_dragnot, samantekt, ...` | D-seine | 5 | 1,854 | 1960–1966 |
+
+All three have `date` fixed to the 15th of the month (a clear mid-month
+placeholder), no coordinates, and exactly one catch row per record — all
+consistent with monthly summaries rather than individual hauls. They were
+identified by inspecting `count(comment)` on the raw table before any
+downstream processing.
+
+These records are excluded from `station.parquet` and `fishing_sample.parquet`
+and stored separately as `data/afli/aggregate.parquet` (Option A), a flat table
+keyed on `.sid × species` that also carries aggregated tow time from the `toga`
+detail table. The original `.sid` is preserved so any record can be traced back
+to the Oracle source.
+
+The practical lesson: always inspect free-text annotation columns early in
+a convert script. Aggregate rows mixed into a station table will silently
+inflate record counts, distort effort distributions, and corrupt swept-area
+calculations if not removed.
+
 ### `station_type` — making provenance explicit
 
 Regardless of which option is chosen, the station table should carry a

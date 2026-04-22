@@ -176,10 +176,10 @@ aux_seine <-
 # they share the same source columns.
 dims <-
   bind_rows(
-    # OTB / OTM — bottom and midwater trawl
+    # OTB / OTM — bottom and midwater trawl; n_units unreliable, assume 1
     aux_mobile |>
       filter(gear %in% c("OTB", "OTM")) |>
-      mutate(effort_count = coalesce(as.integer(n_units), 1L),
+      mutate(effort_count = 1L,
              effort_unit  = "gear-minutes") |>
       select(.sid, n_units, g_mesh, g_width, effort_count, effort_unit),
     # SDN — Danish seine (effort is per setting, not time-based)
@@ -291,22 +291,24 @@ fishing_sample <-
          duration_m, .duration_source,
          effort_count, effort_duration, effort_unit, effort,
          n_units, n_lost, g_mesh, g_width, g_length, g_height,
-         schema)
+         schema) |>
+  select(-date)
 
 # Catch -----------------------------------------------------------------------
 catch <-
   read_parquet("data-raw/data-dump/fs_afladagbok/ws_afli.parquet") |>
   wk_translate(dictionary) |>
-  select(.sid, sid, catch) |>
+  select(.sid, sid, catch = magn) |>  # CHANGE DICTIONARY
   group_by(.sid, sid) |>
   summarise(catch = sum(catch, na.rm = TRUE), .groups = "drop") |>
-  inner_join(fishing_sample |> select(.sid), by = ".sid") |>
+  inner_join(fishing_sample |> select(.sid, schema), by = ".sid") |>
   arrange(.sid, sid)
 
 # Export -----------------------------------------------------------------------
 trip           |> write_parquet("data/fs_afladagbok/trip.parquet")
 station        |> write_parquet("data/fs_afladagbok/station.parquet")
 fishing_sample |> write_parquet("data/fs_afladagbok/fishing_sample.parquet")
+
 catch          |> write_parquet("data/fs_afladagbok/catch.parquet")
 
 

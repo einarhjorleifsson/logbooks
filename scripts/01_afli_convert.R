@@ -1,6 +1,6 @@
 # Create standard summary tables
-# Input:  data-raw/data-dump/afli/{stofn,toga,lineha,gildra,hringn,afli}.parquet
-# Output: data/afli/{trip,station,fishing_sample,sensor,catch}.parquet
+# Input:  data-raw/data-dump/afli/{stofn,toga,lineha,gildra,hringn,afli,rafr_stofn}.parquet
+# Output: data/afli/{trip,station,fishing_sample,sensor,catch,aggregate}.parquet
 
 # Setup -----------------------------------------------------------------------
 library(whack) # pak::pak("einarhjorleifsson/whack")
@@ -12,6 +12,16 @@ SCHEMA <- "afli"
 dictionary   <- read_parquet("data/dictionary.parquet") |> filter(schema == SCHEMA)
 gear_mapping <- read_parquet("data/gear/gear_mapping.parquet") |> filter(version == "old")
 
+# eytt flag: records officially deleted in Oracle (eytt=1 in rafr_stofn).
+# 16,912 such records exist; they were imported into stofn but later deleted.
+# eytt_deleted = TRUE  → deleted in Oracle; treat with caution / exclude.
+# eytt_deleted = FALSE → active in Oracle (rafr_ era, 2003–2020).
+# eytt_deleted = NA    → not in rafr_ (paper era, or 2020–2022 direct-load).
+eytt_ref <- read_parquet("data-raw/data-dump/afli/rafr_stofn.parquet") |>
+  select(visir, eytt) |>
+  mutate(eytt_deleted = eytt == 1L) |>
+  select(visir, eytt_deleted)
+
 # Source (stofn) --------------------------------------------------------------
 # No explicit trip table in this schema; .tid derived as min(.sid) per
 # (vid, T2, hid2). T1 is the minimum fishing date within the derived trip.
@@ -19,6 +29,14 @@ source <-
   read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
   wk_translate(dictionary) |>
   filter(!is.na(date)) |>                        # 40 records have NA date
+  # Remove ~41k monthly aggregate records (nephrops, shrimp, d-seine); these
+  # are summaries at month-gear-vessel-square level, not individual hauls
+  filter(
+    is.na(comment) |
+    (!comment %in% c("Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt",
+                     "Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt") &
+     !str_starts(comment, "Frá afli.gomul_dragnot, samantekt"))
+  ) |>
   mutate(lon1 = -geoconvert.1(x1 * 100),
          lat1 =  geoconvert.1(y1 * 100),
          lon2 = -geoconvert.1(x2 * 100),
@@ -29,8 +47,9 @@ source <-
   mutate(T1 = min(date, na.rm = TRUE), hid1 = NA_integer_) |>
   ungroup() |>
   mutate(schema = SCHEMA) |>
+  left_join(eytt_ref, by = c(".sid" = "visir")) |>
   select(.sid, .tid, vid, gid, date, lon1, lat1, lon2, lat2, sq, ssq, z1, z2,
-         T1, hid1, T2, hid2, n_crew, schema)
+         T1, hid1, T2, hid2, n_crew, schema, eytt_deleted)
 
 # Helper: station keys with ICES gear labels, used in aux table joins below
 stofn_gear <- source |>
@@ -42,12 +61,13 @@ stofn_gear <- source |>
 trip <-
   source |>
   select(.tid, vid, T1, hid1, T2, hid2, n_crew, schema) |>
-  distinct()
+  distinct(.tid, vid, T1, hid1, T2, hid2, .keep_all = TRUE)
 
 # Station (spatial/temporal envelope) -----------------------------------------
 station <-
   source |>
-  select(.sid, .tid, date, lon1, lat1, lon2, lat2, sq, ssq, z1, z2, schema)
+  select(.sid, .tid, date, lon1, lat1, lon2, lat2, sq, ssq, z1, z2, schema,
+         eytt_deleted)
 
 # Aux tables ------------------------------------------------------------------
 # Each block reads one source parquet, translates columns, and inner-joins to
@@ -110,7 +130,8 @@ dims <-
     # OTB / OTM — gear dimension documentation pending
     aux_mobile |>
       filter(gear %in% c("OTB", "OTM")) |>
-      mutate(effort_count = coalesce(as.integer(n_units), 1L),
+      # I think we can assume that this is always 1
+      mutate(effort_count = 1L,
              effort_unit  = "gear-minutes") |>
       select(.sid, n_units, effort_count, effort_unit, bottom_type, catch_nperkg),
     # DRB — dredge / plow
@@ -163,6 +184,7 @@ dims <-
              g_mesh = mesh, g_length, g_height)
   )
 
+
 ## Gear caps -------------------------------------------------------------------
 # Maximum plausible fishing duration per gear × target combination (minutes).
 gear_caps <- tribble(
@@ -191,7 +213,7 @@ gear_caps <- tribble(
 ## Assemble fishing_sample -----------------------------------------------------
 fishing_sample <-
   source |>
-  select(.tid, .sid, gid, date, schema) |>
+  select(.tid, .sid, gid, date, schema, eytt_deleted) |>
   # Old → new gear code mapping done once here
   rename(gid_old = gid) |>
   left_join(gear_mapping |> select(gid_old = gid, gid = map, gear, target2),
@@ -222,6 +244,7 @@ fishing_sample <-
   ),
   effort = effort_count * effort_duration)
 
+
 ## Timestamps ------------------------------------------------------------------
 # Mobile: derive t1 from hhmm when absent; derive t2 from t1 + duration_m.
 # Static: t2/t3 come from data; t1 is never recorded (remains NA).
@@ -241,6 +264,7 @@ fishing_sample <- fishing_sample |>
                           !is.na(t1) & !is.na(duration_m)   ~ t1 + minutes(as.integer(duration_m)))) |>
   select(-c(hhmm, hh, mm))
 
+
 ## Overlap QC ------------------------------------------------------------------
 # Nullify t1/t2 for operations whose windows overlap a neighbour on the same
 # vessel. Effectively applies to mobile gear only — static-gear t1 is NA so
@@ -253,10 +277,22 @@ fishing_sample <- fishing_sample |>
          t2 = if_else(.checks != "ok", NA, t2)) |>
   select(-vid)
 
+
 ## Join gear dimensions --------------------------------------------------------
 fishing_sample <- fishing_sample |>
   left_join(dims |> select(-effort_count, -effort_unit), by = ".sid")
 
+
+## Back-entry flag -------------------------------------------------------------
+# TRUE for records with pre-1980 dates AND .sid > 2,500,000.
+# Rationale: genuine contemporaneous early records (1969–1979) have .sid ≤ 2.34M;
+# all pre-1980 records above that threshold form identified retrospective
+# back-entry batches. See afli-backentry.qmd for full derivation.
+fishing_sample <- fishing_sample |>
+  mutate(back_entry = !is.na(date) & year(date) < 1980 & .sid > 2500000)
+
+fishing_sample <- fishing_sample |>
+  select(-date)
 # Sensor -----------------------------------------------------------------------
 sensor <-
   bind_rows(
@@ -279,8 +315,46 @@ catch <-
   select(.sid, sid, catch) |>
   group_by(.sid, sid) |>
   summarise(catch = sum(catch, na.rm = TRUE), .groups = "drop") |>
-  inner_join(fishing_sample |> select(.sid), by = ".sid") |>
+  inner_join(fishing_sample |> select(.sid, schema), by = ".sid") |>
   arrange(.sid, sid)
+
+# Aggregate records (monthly summaries, not individual hauls) -----------------
+# Excluded from station/fishing_sample but preserved as a flat catch table:
+# one row per (period × gear × vessel × sq × species).
+# date is mid-month (15th); no coordinates available; duration_m is total
+# aggregated tow time for the period (not a single-haul value).
+agg_stofn <-
+  read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+  wk_translate(dictionary) |>
+  filter(!is.na(date)) |>
+  filter(
+    comment %in% c("Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt",
+                   "Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt") |
+    str_starts(comment, "Frá afli.gomul_dragnot, samantekt")
+  ) |>
+  mutate(
+    agg_type = case_when(
+      comment == "Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt"      ~ "nephrops",
+      comment == "Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt"      ~ "shrimp",
+      str_starts(comment, "Frá afli.gomul_dragnot, samantekt") ~ "dseine"
+    )
+  ) |>
+  select(.sid, vid, gid, date, sq, ssq, agg_type)
+
+agg_catch <-
+  read_parquet("data-raw/data-dump/afli/afli.parquet") |>
+  wk_translate(dictionary, "messy", "clean") |>
+  select(.sid, sid, catch) |>
+  inner_join(agg_stofn, by = ".sid") |>
+  left_join(
+    read_parquet("data-raw/data-dump/afli/toga.parquet") |>
+      wk_translate(dictionary) |>
+      select(.sid, duration_m),
+    by = ".sid"
+  ) |>
+  select(.sid, vid, gid, date, sq, ssq, agg_type, sid, catch, duration_m) |>
+  arrange(.sid, sid)
+
 
 # Export -----------------------------------------------------------------------
 trip           |> write_parquet("data/afli/trip.parquet")
@@ -288,6 +362,7 @@ station        |> write_parquet("data/afli/station.parquet")
 fishing_sample |> write_parquet("data/afli/fishing_sample.parquet")
 sensor         |> write_parquet("data/afli/sensor.parquet")
 catch          |> write_parquet("data/afli/catch.parquet")
+agg_catch      |> write_parquet("data/afli/aggregate.parquet")
 
 
 # QC scratch (if FALSE) -------------------------------------------------------

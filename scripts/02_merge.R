@@ -9,7 +9,8 @@
 #
 # Rationale:
 #   afli > fs_afladagbok: afli mobile-gear timing is derived from the on-bottom
-#   clock and is more accurate than the electronic timestamps in fs_afladagbok.
+#   clock - when fs_afladagbok was instigated timestamps and/or duration were
+#.  missing in fs_afladagbok.
 #
 # Date bounds applied:
 #   afli          — no lower bound; upper: <= DATE_MAX

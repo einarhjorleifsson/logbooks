@@ -100,6 +100,7 @@ Gear-specific columns are `NA` where not applicable.
 | `g_width` | dbl | Gear width (trawls: beam/wing span; dredge: plow width) |
 | `g_length` | dbl | Gear length (seine: rope length; gillnet: total net length) |
 | `g_height` | dbl | Gear height (dredge height; gillnet height) |
+| `back_entry` | lgl | `TRUE` for pre-1980 records with `.sid > 2,500,000` — retrospective back-entries; `FALSE` for genuine contemporaneous records and all post-1979 data. `afli` only; `NA` for `fs_afladagbok`. See `afli-backentry.qmd`. |
 | `schema` | chr | Schema tag |
 
 > **`t1` note.** For `fs_afladagbok`, `t1` (`milli_timi`) is absent for OTB
@@ -122,6 +123,38 @@ dropped via `inner_join`.
 | `source` | chr | Schema tag |
 
 ---
+
+## `aggregate.parquet` (`data/afli/` only — not in merge)
+
+Monthly summary records from `afli/stofn` that were back-entered as aggregates
+rather than individual hauls. Excluded from `station.parquet`,
+`fishing_sample.parquet`, and the merged output because they do not represent
+discrete fishing operations. Preserved here for catch time-series and coverage
+work.
+
+**Three source types**, all with `date` pinned to the 15th of the month and no
+coordinates:
+
+| `agg_type` | `gid` | Records | Date range | Original `comment` |
+|---|---|---|---|---|
+| `"nephrops"` | 9 | 26,405 | 1960–1999 | `Frá OPS$SIGFUS.GAMALL_HUMAR, samantekt` |
+| `"shrimp"` | 14 | 12,708 | 1953–1986 | `Frá OPS$SIGFUS.GOMUL_RAEKJA, samantekt` |
+| `"dseine"` | 5 | 1,854 | 1960–1966 | `Frá afli.gomul_dragnot, samantekt, ...` |
+
+**Schema:** one row per aggregate station × species.
+
+| Column | Type | Description |
+|---|---|---|
+| `.sid` | int | Station identifier (links to raw `stofn`) |
+| `vid` | int | Vessel identifier (`NA` for some dseine rows) |
+| `gid` | int | Gear code (new version) |
+| `date` | datetime | Month midpoint (always the 15th) |
+| `sq` | int | Statistical square |
+| `ssq` | int | Statistical sub-square |
+| `agg_type` | chr | `"nephrops"`, `"shrimp"`, or `"dseine"` |
+| `sid` | int | Species identifier |
+| `catch` | dbl | Catch (summed within `.sid × sid`) |
+| `duration_m` | dbl | Aggregated tow time from `toga`; `NA` for dseine (no toga records) |
 
 ---
 

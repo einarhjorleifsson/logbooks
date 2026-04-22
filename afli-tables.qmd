@@ -65,6 +65,13 @@ Cross-matching confirms that ~96% of `rafr_stofn` rows reappear in `stofn`
 records are loaded from XML into `rafr_stofn` (and its gear subtables) and
 simultaneously written to the master `stofn` (and its gear subtables).
 
+However, `stofn` has 1,275,274 negative-visir rows while `rafr_stofn`
+has only 1,149,278 — the extra ~166K come from a **second electronic
+pathway** (see Phase 4 below) that loaded records directly into `stofn`
+without creating `rafr_*` staging rows. A further ~40K `rafr_stofn` rows
+do not appear in `stofn`: 16,912 with `eytt = 1` (officially deleted) and
+~23K that were likely rejected during Oracle consolidation.
+
 The distinction matters for analysis: the master tables (`stofn` / `afli` /
 `toga` …) give the most complete single view spanning all eras, while the
 `rafr_*` staging tables are the only place to find the XML back-links
@@ -99,6 +106,15 @@ digital logbooks. Annual volumes stabilise at ~80,000–100,000 stations/year
 through 2019. From 2020 onwards the `afli`/`rafr_*` series tapers as the
 newer `fs_afladagbok` and `adb` systems take over reception of fresh
 submissions.
+
+**Phase 4: Direct-load electronic records (2020–2022).** `stofn` contains
+~165K negative-visir records in 2020–2022 that have no counterpart in
+`rafr_stofn`. These appear to be electronic submissions that entered `stofn`
+directly — bypassing the `rafr_*` staging pipeline — during the transition
+period when `fs_afladagbok` was becoming the primary reception system. They
+use the same old gear codes (veidarf 1–15) and the same DDMM coordinate
+encoding as the Phase 3 records; they are otherwise indistinguishable in the
+master tables.
 
 The `afladagb_skil` / `afladagb_skil_linur` compliance tables were added in
 **January 2014** (per Oracle comment) to formally track whether vessels met
@@ -527,7 +543,14 @@ The `stofn.visir` sign convention:
 | Sign | Source |
 |---|---|
 | positive | Paper-era record (transcribed from physical logbook) |
-| negative | Electronic-era record (loaded from XML via `rafr_stofn`) |
+| negative (2003–2020) | Electronic-era record loaded via `rafr_*` staging pipeline |
+| negative (2020–2022) | Electronic-era record direct-loaded into `stofn`, bypassing `rafr_*` |
+
+**Minor hand-editing.** A small fraction (~0.7%) of `rafr_stofn` records
+that were consolidated into `stofn` show differences in `lengd`, `breidd`,
+or `vedags` between the two tables. `stofn` holds the corrected values;
+`rafr_stofn` preserves the original electronic submission. The master tables
+are therefore the authoritative source for fishing data.
 
 ---
 
@@ -539,7 +562,13 @@ The `stofn.visir` sign convention:
   appear and likely represent open-ended validity periods.
 
 - **`eytt` (deleted) flag.** `rafr_stofn` carries an `eytt` column (0/1).
-  Rows with `eytt = 1` should be excluded from analysis.
+  16,912 rows have `eytt = 1` (officially deleted in Oracle). Of these, 327
+  passed through the consolidation into `stofn` and appear in the current
+  `data/afli/station.parquet` and `data/afli/fishing_sample.parquet` outputs
+  (none carry catch). The convert script (`01_afli_convert.R`) now propagates
+  this as an `eytt_deleted` logical column: `TRUE` = deleted in Oracle,
+  `FALSE` = active in rafr_ era (2003–2020), `NA` = paper era or Phase 4
+  direct-load.
 
 - **`snt`/`sng`/`sbt`/`sbg` audit columns.** Nearly all electronic tables
   carry these four columns (stamped-name/time, approved-name/time). They record
