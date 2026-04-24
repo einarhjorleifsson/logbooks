@@ -5,7 +5,7 @@
 | File | Load when… |
 |---|---|
 | `AGENTS_data_sources.md` | Working on raw data, convert scripts, or the dictionary |
-| `AGENTS_output_schema.md` | Working on convert scripts, output schemas, merge script, or reading `data/merged/` or `data/<schema>/` |
+| `AGENTS_output_schema.md` | Working on convert scripts, output schemas, merge script, or reading `data/logbooks/` or `data-raw/logbooks/<schema>/` |
 
 ---
 
@@ -20,13 +20,13 @@ format (`trip`, `station`, `fishing_sample`, `catch` parquet files):
 
 | Schema | Convert script | Output | Status |
 |---|---|---|---|
-| `fs_afladagbok` | `scripts/01_fs_afladagbok_convert.R` | `data/fs_afladagbok/*.parquet` | done |
-| `afli` | `scripts/01_afli_convert.R` | `data/afli/*.parquet` | done |
-| `adb` | `scripts/01_adb_convert.R` | `data/adb/*.parquet` | not in merge |
-| **merged** | `scripts/02_merge.R` | `data/merged/*.parquet` | done |
-| **siritar** | `scripts/01_siritar.R` | `data/afli/sensor_GPS.parquet` | in progress |
+| `fs_afladagbok` | `data-raw/logbooks/01_fs_afladagbok_convert.R` | `data-raw/logbooks/fs_afladagbok/*.parquet` | done |
+| `afli` | `data-raw/logbooks/01_afli_convert.R` | `data-raw/logbooks/afli/*.parquet` | done |
+| `adb` | `data-raw/logbooks/01_adb_convert.R` | `data-raw/logbooks/adb/*.parquet` | not in merge |
+| **merged** | `data/logbooks.R` | `data/logbooks/*.parquet` | done |
+| **siritar** | `data-raw/logbooks/01_afli_siritar.R` | `data-raw/logbooks/afli/sensor_GPS.parquet` | in progress |
 
-`scripts/01_siritar.R` — AIS-based wacky coordinate recovery for `sjalfvirkir_maelar`/`rafr_sjalfvirkir_maelar`. Interpolates corrected lon/lat from AIS tracks (`data/trail`) onto GPS logger timestamps; retains original wacky coords as `w_lon`/`w_lat`. `dt_sec` is the time gap between adjacent rows in the combined gps+AIS sequence — an approximation of the interpolation interval (larger → less reliable position). `approx(..., rule = 1)`: lon/lat will be `NA` where AIS does not bracket the GPS timestamp.
+`data-raw/logbooks/01_afli_siritar.R` — AIS-based wacky coordinate recovery for `sjalfvirkir_maelar`/`rafr_sjalfvirkir_maelar`. Interpolates corrected lon/lat from AIS tracks (`data/trail`) onto GPS logger timestamps; retains original wacky coords as `w_lon`/`w_lat`. `dt_sec` is seconds between the two AIS fixes that bracket each GPS timestamp (the actual interpolation interval; `NA` for extrapolated records). `approx(..., rule = 2)`: GPS timestamps outside the AIS window are extrapolated from the nearest AIS endpoint; `NA` lon/lat only for vessels with no AIS in that year.
 
 - `fs_afladagbok` — FisheryScan digital logbooks from Fiskistofa; static dump through 2025-12
 - `afli` — legacy Oracle system; primary historical source (~1950–present); 96 tables
@@ -35,6 +35,19 @@ format (`trip`, `station`, `fishing_sample`, `catch` parquet files):
 
 Key structural differences across schemas: start/end of fishing activity
 recorded differently; numerical gear code systems differ (old vs new).
+
+Seasonality in Icelandic fisheries (relevant for interpreting trip/landing volume patterns):
+- **Summer jigger fishery** (LHM) — primary seasonal driver; peaks July–August.
+- **Lumpsucker fishery** (Grásleppunet/Rauðmaganet) — secondary peak in spring.
+
+Pelagic catch accounting:
+- It is common in Icelandic pelagic fisheries for a vessel to transfer its catch to
+  another fishing vessel in the vicinity rather than returning to port. The catching
+  vessel's logbook records the full haul; the landing appears under the receiving
+  vessel's identifier. Trip-level logbook/landing weight ratios are therefore not
+  expected to balance for pelagic trips. Units in both `catch.parquet` and
+  `aflagrunnur_v` (`magn_oslaegt`) are kg throughout; median ratio ≈ 1.0 for both
+  pelagic and non-pelagic trips confirms this.
 
 ---
 
@@ -94,8 +107,14 @@ counts (2026-04-20): 7,260,215 stations · 1,831,690 trips · 16,782,743 catch r
 
 ## Pipeline orchestration (`targets`)
 
-Entry point: `_targets.R`. 12 targets across 4 tiers; Tier-1 conversions can
+Entry point: `_targets.R`. 12 targets across 4 stages; Stage 1 conversions can
 run in parallel with `tar_make(workers = N)`.
+
+Directory layout:
+- `data-raw/logbooks/` — convert scripts + per-schema intermediate parquet outputs (`afli/`, `fs_afladagbok/`, `adb/`)
+- `data/logbooks.R` — merge script
+- `data/logbooks/` — final merged parquet output
+- `data-dump/` — Oracle dump scripts, organised into `logbooks/`, `gear/`, `species/` subdirs
 
 | Command | Effect |
 |---|---|
@@ -129,7 +148,7 @@ run in parallel with `tar_make(workers = N)`.
 - Site URL: <https://heima.hafro.is/~einarhj/logbooks>
 - GitHub: <https://github.com/einarhjorleifsson/logbooks>
 
-**Navbar** (left-to-right): Home · Grammar · Source Data · Pipeline (Convert/Merge) · Coordinates · Notes · GitHub
+**Navbar** (left-to-right): Home · Grammar · Source Data · Pipeline (Convert/Merge) · Coordinates · Landings Match · Notes · GitHub
 
 | File | Topic |
 |---|---|
@@ -140,28 +159,53 @@ run in parallel with `tar_make(workers = N)`.
 | `merge.qmd` | Merge rationale (afli > fs_afladagbok), two-tier method, coverage analysis, timing quality, catch totals |
 | `wacky_recovery.qmd` | **Combined** wacky coordinate document — discovery, mechanism, recovery, appendices (maths, algorithm, functions) |
 | `afli-backentry.qmd` | Historical back-entry investigation — derivation of `back_entry` flag; 5-step analysis with plots; block summary table |
+| `landings-match.qmd` | Linking landings to logbook trips; schema-stratified cascade (`afli` 94.7% matched; `fs_afladagbok` 77.8% matched); `fs_afladagbok` uses `hafnarnumer_id` (sequential 1–140) vs `hafnarnumer` in `aflagrunnur_v` — resolved via `data/harbours/icelandic_harbours.parquet` crosswalk (99.9% coverage); afli fuzzy date attempts confirm unmatched are genuine gaps (nearest landing >7 days) |
 | `ramb-list.qmd` | Informal notes |
 | `_wackytracks.qmd` | Archived; content absorbed into `wacky_recovery.qmd` |
 
 ---
 
+## Institutional context (afli era)
+
+- **E-logbook adoption** happened during the `afli` schema phase, not at the `afli` →
+  `fs_afladagbok` transition. Larger vessels adopted Trackwell e-logbooks progressively;
+  smaller vessels (lumpfish, coastal gears) remained on paper throughout.
+- **Single curator**: one government employee was responsible for manually entering paper
+  logbooks and loading both paper and electronic records into the legacy `afli` structure
+  (`stofn`, `toga`, `lineha`, …). The steady improvement in logbook-landing match rates
+  2008–2018 is at least partly attributable to his active curation; his retirement around
+  2019–2020 likely explains the subsequent decline within the `afli` era.
+- **Spring 2021 market opening**: until early 2021, Trackwell had an exclusive government
+  contract for e-logbook software. Opening the market to multiple companies was abrupt —
+  a structural break in data quality, not a gradual transition. This "wild west" period
+  explains inconsistent harbour codes, incomplete timing/duration records, and other QC
+  issues characteristic of the `fs_afladagbok` era. Crucially, the overlap period between
+  `afli` and `fs_afladagbok` (2021–2022) falls squarely within this wild west window,
+  which is the primary justification for the merge rule **afli wins over fs_afladagbok**
+  where both schemas cover the same trip. This priority is about relative data quality
+  during the overlap, not about paper vs. electronic recording.
+
+---
+
 ## Known data quality issues
 
-1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Mathematical recovery documented in `wacky_recovery.qmd`. AIS-based recovery implemented in `scripts/01_siritar.R` (interpolates AIS ground-truth positions; in progress — see bugs listed above).
+1. **Wacky coordinates** (`sjalfvirkir_maelar`, `rafr_sjalfvirkir_maelar`) — systematic DDMMmm→DMS misconversion by Trackwell/SeaData software; shifts positions ≤ ~0.4 NM; confirmed sender-side; ~4% records unambiguous, ~33% partial, ~63% ambiguous. Mathematical recovery documented in `wacky_recovery.qmd`. AIS-based recovery implemented in `data-raw/logbooks/01_afli_siritar.R` (interpolates AIS ground-truth positions; in progress).
 2. **Erroneous timestamps** — year-1899 and year-2090s entries in `rafr_sjalfvirkir_maelar`; likely Oracle null/default date values.
 3. **Historical back-entries** — 95,743 stations (~1.7%) have pre-1980 dates but `.sid > 2.5M`, indicating retrospective digitisation long after the fishing events. Flagged as `back_entry = TRUE` in `fishing_sample.parquet`. Genuine contemporaneous early records (blocks 1–2, `.sid` ≤ 2.34M, 1969–1979) are left as `FALSE`. No random date-entry typos found at scale; all anomalous date clusters are organised multi-vessel batches with catch data. See `afli-backentry.qmd` for full derivation.
 4. **Residual t1 ≤ t4 violations** — small number in `afli` (negative-.sid garbage records). Filter `.sid > 0` before timing-sensitive analyses.
 5. **DRB duration suspiciously short** — `fs_afladagbok` DRB median ~18 min; may reflect how `upphaf_timi`/`lok_timi` are populated for plow gear. Not investigated.
 6. **~54k OTB stations (2021–2022) with no `ws_dragnot_varpa` record** — `effort_unit = NA` for those rows; source completeness gap in `fs_afladagbok`.
-7. **`eytt_deleted` records (327 stations)** — 16,912 `rafr_stofn` records have `eytt = 1` (officially deleted in Oracle); 327 passed through into `data/afli/station.parquet` and `fishing_sample.parquet`. Flagged as `eytt_deleted = TRUE` in both tables. `rafr_*` era records have `eytt_deleted = FALSE`; paper-era and Phase 4 direct-load records have `eytt_deleted = NA`. See `afli-tables.qmd` #sec-artefacts.
+7. **`eytt_deleted` records (327 stations)** — 16,912 `rafr_stofn` records have `eytt = 1` (officially deleted in Oracle); 327 passed through into `data-raw/logbooks/afli/station.parquet` and `fishing_sample.parquet`. Flagged as `eytt_deleted = TRUE` in both tables. `rafr_*` era records have `eytt_deleted = FALSE`; paper-era and Phase 4 direct-load records have `eytt_deleted = NA`. See `afli-tables.qmd` #sec-artefacts.
 8. **Two negative-visir pathways in `stofn`** — electronic records with negative `visir` come from two sources: (a) `rafr_*` staging pipeline (~1.1M records, 2003–2020); (b) direct-load bypassing `rafr_*` (~165K records, 2020–2022). Both use the same DDMM coordinate encoding and old gear codes. The `rafr_*` tables are **not** richer in fishing-data terms than `stofn`; they only add XML provenance and audit columns. See `afli-tables.qmd` #sec-master for full characterisation.
 
 ---
 
 ## Outstanding Work
 
-- [ ] **Finalise `scripts/01_siritar.R`** — schema bug fixed; output renamed to `sensor_GPS.parquet`. Remaining: run at full scale and write corrected parquet to `data/afli/`; notify `../fishydata`.
-- [ ] **Characterise AIS coverage gaps** — `approx(..., rule = 1)` produces NA lon/lat where AIS does not bracket GPS timestamps; quantify how many sensor records end up with NA positions.
+- [ ] **Lumpfish (grásleppunet / rauðmaganet) logbook QA** — `gid=3` (Grásleppunet) and `gid=4` (Rauðmaganet) in `aflagrunnur_v` together account for ~60k landings 2008–2020; match rates are 26% and 50% respectively. Both gear types target lumpfish. Logbook records in `afli` for lumpfish are known to be problematic (seasonal timing, gear reporting). Needs dedicated investigation before lumpfish data are used in catch reconciliation. See `landings-match.qmd` #sec-reverse.
+
+- [ ] **Finalise `data-raw/logbooks/01_afli_siritar.R`** — script restructured; `rule = 2` extrapolates at AIS boundaries. Remaining: run at full scale and write corrected parquet to `data-raw/logbooks/afli/sensor_GPS.parquet`; notify `../fishydata`.
+- [ ] **Characterise AIS coverage gaps** — `approx(..., rule = 2)` produces NA lon/lat only for vessels with no AIS in that year; quantify how many sensor records are affected.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` — classify Flotvarpa (`ws_veidi`) rows by `uppruni` to separate decimal-degree from DMS sources.
 - [ ] **Confirm longline `effort_count` semantics** — is `fj_kroka` the total hook count (`onglar × bjod` aggregated) or number of lines? Treat hook-day values as approximate until confirmed.
 - [x] **t0–t3 → t1–t4 reset completed (2026-04-22)** — all convert scripts, dictionary, grammar.qmd, merge.qmd, AGENTS_output_schema.md updated. `t2` (deployment end) is `NA` throughout; `t4` (retrieval end) is `NA` for mobile gear.
@@ -173,13 +217,14 @@ run in parallel with `tar_make(workers = N)`.
 - [x] **DRB `gid_old = 38` spike investigated (2026-04-22)** — confirmed genuine contemporaneous fishery, not back-entry. `gid_old = 38` = Kúffisksplógur (roundnose grenadier plow). 10 vessels, ~16,600 stations across 2017–2018, ~8,100 tonnes of species 199 (grenadier). `.sid` values fully interleaved with coeval OTB records; all via rafr_ pipeline. Spike reflects a 2-year permit window for this deep-water plow fishery. Records are clean; no pipeline action required.
 - [x] `rafr_` vs `stofn` strategic review (2026-04-22) — confirmed master tables are authoritative; `rafr_*` adds only XML provenance; two negative-visir pathways documented (rafr_ 2003–2020, direct-load 2020–2022); `eytt_deleted` flag added to `station` and `fishing_sample` outputs; `afli-tables.qmd` updated with Phase 4 and hand-editing sections
 - [x] `grammar.qmd` updated (2026-04-21) — sensor layer section added (station supplement vs time-series distinction; multi-table, multi-resolution pattern; NMEA foreshadowing); parallel-projects extension added (landings, surveys, continuous underway); landings section reframed as parallel-project prototype
-- [x] `scripts/01_afli_convert.R` audited, fixed, and rewritten (2026-04-11/20) — produces `trip`, `station`, `fishing_sample`, `sensor`, `catch`; gear dims renamed to `g_*` prefix
-- [x] `scripts/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t4−t1` for all time-based gears
-- [x] `scripts/02_merge.R` refactored to two-tier (2026-04-20) — adb dropped; `fishing_sample` added to merge; 7,260,215 stations, 1,831,690 trips, 16,782,743 catch rows
+- [x] `data-raw/logbooks/01_afli_convert.R` audited, fixed, and rewritten (2026-04-11/20) — produces `trip`, `station`, `fishing_sample`, `sensor`, `catch`; gear dims renamed to `g_*` prefix
+- [x] `data-raw/logbooks/01_fs_afladagbok_convert.R` rewritten (2026-04-20) — produces `trip`, `station`, `fishing_sample`, `catch`; full effort calc; `auxillary.parquet` dropped; `medal_lengd_neta` added to dictionary; duration = `t4−t1` for all time-based gears
+- [x] `data/logbooks.R` (formerly `scripts/02_merge.R`) refactored to two-tier (2026-04-20) — adb dropped; `fishing_sample` added to merge; 7,260,215 stations, 1,831,690 trips, 16,782,743 catch rows
 - [x] `merge.qmd` rewritten (2026-04-20) — two-tier afli + fs_afladagbok; timing analysis in fishing_sample; coverage, timing quality, catch sections
 - [x] `_targets.R` created (2026-04-12) — 12 targets, 4 tiers, parallelisable Tier-1
 - [x] `data-raw/DATASET_dictionary.R` extended (2026-04-19/20) — afli gear-detail tables + `medal_lengd_neta`; 154 entries total
 - [x] `afli-tables.qmd` written (2026-04-19) — 96-table inventory, three eras, wacky coordinate origin confirmed sender-side
-- [x] `scripts/01_afladagb_xml_nmea.R` written (2026-04-19) — extracts NMEA from XML into `data/afli/nmea.parquet`
+- [x] `data-raw/logbooks/01_afladagb_xml_nmea.R` written (2026-04-19) — extracts NMEA from XML into `data-raw/logbooks/afli/nmea.parquet`
+- [x] `data-raw/logbooks/01_afladagb_xml_nav.R` written — extracts navigational/positional data from `afladagb_xml_mottaka` into `data-raw/logbooks/afli/nav.parquet`
 - [x] `_quarto.yml` navbar reorganised (2026-04-19) — all QMD documents, left-to-right narrative order
 - [x] Wacky coordinate documents merged (2026-04-19) — single `wacky_recovery.qmd`; inverted-pyramid structure

@@ -52,10 +52,10 @@ list(
 
   tar_target(script_dict,  "data-raw/DATASET_dictionary.R",     format = "file"),
   tar_target(script_gear,  "data-raw/DATASET_gear-codes.R",      format = "file"),
-  tar_target(script_afli,  "scripts/01_afli_convert.R",          format = "file"),
-  tar_target(script_fs,    "scripts/01_fs_afladagbok_convert.R", format = "file"),
-  tar_target(script_adb,   "scripts/01_adb_convert.R",           format = "file"),
-  tar_target(script_merge, "scripts/02_merge.R",                 format = "file"),
+  tar_target(script_afli,  "data-raw/logbooks/01_afli_convert.R",          format = "file"),
+  tar_target(script_fs,    "data-raw/logbooks/01_fs_afladagbok_convert.R", format = "file"),
+  tar_target(script_adb,   "data-raw/logbooks/01_adb_convert.R",           format = "file"),
+  tar_target(script_merge, "data/logbooks.R",                 format = "file"),
 
 
   # ── Stage 0b: Lookup tables ──────────────────────────────────────────────────
@@ -100,10 +100,10 @@ list(
       dictionary_file                              # must exist before this runs
       gear_mapping_file
       script_afli                                  # re-run when script changes
-      source("scripts/01_afli_convert.R")
-      c("data/afli/trip.parquet",
-        "data/afli/station.parquet",
-        "data/afli/catch.parquet")
+      source("data-raw/logbooks/01_afli_convert.R")
+      c("data-raw/logbooks/afli/trip.parquet",
+        "data-raw/logbooks/afli/station.parquet",
+        "data-raw/logbooks/afli/catch.parquet")
     },
     format = "file"
   ),
@@ -114,10 +114,10 @@ list(
       dictionary_file
       gear_mapping_file
       script_fs
-      source("scripts/01_fs_afladagbok_convert.R")
-      c("data/fs_afladagbok/trip.parquet",
-        "data/fs_afladagbok/station.parquet",
-        "data/fs_afladagbok/catch.parquet")
+      source("data-raw/logbooks/01_fs_afladagbok_convert.R")
+      c("data-raw/logbooks/fs_afladagbok/trip.parquet",
+        "data-raw/logbooks/fs_afladagbok/station.parquet",
+        "data-raw/logbooks/fs_afladagbok/catch.parquet")
     },
     format = "file"
   ),
@@ -128,10 +128,10 @@ list(
       dictionary_file
       gear_mapping_file
       script_adb
-      source("scripts/01_adb_convert.R")
-      c("data/adb/trip.parquet",
-        "data/adb/station.parquet",
-        "data/adb/catch.parquet")
+      source("data-raw/logbooks/01_adb_convert.R")
+      c("data-raw/logbooks/adb/trip.parquet",
+        "data-raw/logbooks/adb/station.parquet",
+        "data-raw/logbooks/adb/catch.parquet")
     },
     format = "file"
   ),
@@ -150,10 +150,10 @@ list(
       adb_files
       gear_mapping_file
       script_merge
-      source("scripts/02_merge.R")
-      c("data/merged/trip.parquet",
-        "data/merged/station.parquet",
-        "data/merged/catch.parquet")
+      source("data/logbooks.R")
+      c("data/logbooks/trip.parquet",
+        "data/logbooks/station.parquet",
+        "data/logbooks/catch.parquet")
     },
     format = "file"
   )

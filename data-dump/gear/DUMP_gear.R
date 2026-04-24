@@ -28,7 +28,4 @@ tbl_mar(con, "gear.gear_category") |>
 tbl_mar(con, "gear.isscfg") |>
   collect() |>
   write_parquet("data-raw/data-dump/gear/gear_isscfg.parquet")
-tbl_mar(con, "asfis.asfis") |>
-  collect() |>
-  write_parquet("data-raw/data-dump/gear/asfis.parquet")
 

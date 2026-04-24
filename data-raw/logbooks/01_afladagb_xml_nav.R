@@ -198,6 +198,7 @@ extract_nav <- function(id, vid, xml_string) {
 library(furrr)
 plan(multisession)
 d <- read_parquet("data-raw/data-dump/afli/afladagb_xml_mottaka.parquet")
+d$sending
 
 nav <- furrr::future_pmap(
   list(id = d$id, vid = d$skip_nr, xml_string = d$sending),

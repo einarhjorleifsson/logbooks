@@ -1,7 +1,7 @@
 # Merge afli (legacy) and fs_afladagbok into unified tables
-# Input:  data/afli/{trip,station,fishing_sample,catch}.parquet
-#         data/fs_afladagbok/{trip,station,fishing_sample,catch}.parquet
-# Output: data/merged/{trip,station,fishing_sample,catch}.parquet
+# Input:  data-raw/logbooks/afli/{trip,station,fishing_sample,catch}.parquet
+#         data-raw/logbooks/fs_afladagbok/{trip,station,fishing_sample,catch}.parquet
+# Output: data/logbooks/{trip,station,fishing_sample,catch}.parquet
 #
 # Decision rule (two-tier priority):
 #   Tier 1 — if (vid, date) present in afli            → use afli
@@ -25,15 +25,15 @@ FS_DATE_MAX <- as.Date("2025-12-31")
 DATE_MAX    <- as.Date("2026-12-31")
 
 # Load -------------------------------------------------------------------------
-afli_trip           <- read_parquet("data/afli/trip.parquet")
-afli_station        <- read_parquet("data/afli/station.parquet")
-afli_fishing_sample <- read_parquet("data/afli/fishing_sample.parquet")
-afli_catch          <- read_parquet("data/afli/catch.parquet")
+afli_trip           <- read_parquet("data-raw/logbooks/afli/trip.parquet")
+afli_station        <- read_parquet("data-raw/logbooks/afli/station.parquet")
+afli_fishing_sample <- read_parquet("data-raw/logbooks/afli/fishing_sample.parquet")
+afli_catch          <- read_parquet("data-raw/logbooks/afli/catch.parquet")
 
-fs_trip           <- read_parquet("data/fs_afladagbok/trip.parquet")
-fs_station        <- read_parquet("data/fs_afladagbok/station.parquet")
-fs_fishing_sample <- read_parquet("data/fs_afladagbok/fishing_sample.parquet")
-fs_catch          <- read_parquet("data/fs_afladagbok/catch.parquet")
+fs_trip           <- read_parquet("data-raw/logbooks/fs_afladagbok/trip.parquet")
+fs_station        <- read_parquet("data-raw/logbooks/fs_afladagbok/station.parquet")
+fs_fishing_sample <- read_parquet("data-raw/logbooks/fs_afladagbok/fishing_sample.parquet")
+fs_catch          <- read_parquet("data-raw/logbooks/fs_afladagbok/catch.parquet")
 
 # Apply date bounds ------------------------------------------------------------
 afli_station <- afli_station |> filter(date <= DATE_MAX)
@@ -103,8 +103,8 @@ merged_station |>
   print()
 
 # Export -----------------------------------------------------------------------
-dir.create("data/merged", showWarnings = FALSE, recursive = TRUE)
-merged_trip           |> write_parquet("data/merged/trip.parquet")
-merged_station        |> write_parquet("data/merged/station.parquet")
-merged_fishing_sample |> write_parquet("data/merged/fishing_sample.parquet")
-merged_catch          |> write_parquet("data/merged/catch.parquet")
+dir.create("data/logbooks", showWarnings = FALSE, recursive = TRUE)
+merged_trip           |> write_parquet("data/logbooks/trip.parquet")
+merged_station        |> write_parquet("data/logbooks/station.parquet")
+merged_fishing_sample |> write_parquet("data/logbooks/fishing_sample.parquet")
+merged_catch          |> write_parquet("data/logbooks/catch.parquet")

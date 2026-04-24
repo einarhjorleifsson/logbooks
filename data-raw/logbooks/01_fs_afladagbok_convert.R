@@ -1,7 +1,7 @@
 # Create standard summary tables
-# Input:  data-raw/data-dump/fs_afladagbok/{ws_veidiferd,ws_veidi,ws_afli,
+# Input:  data-dump/logbooks/fs_afladagbok/{ws_veidiferd,ws_veidi,ws_afli,
 #           ws_dragnot_varpa,ws_plogur,ws_linanethandf,ws_gildra,ws_hringn}.parquet
-# Output: data/fs_afladagbok/{trip,station,fishing_sample,catch}.parquet
+# Output: data-raw/logbooks/fs_afladagbok/{trip,station,fishing_sample,catch}.parquet
 
 # Setup -----------------------------------------------------------------------
 library(whack)     # pak::pak("einarhjorleifsson/whack")
@@ -12,6 +12,10 @@ library(nanoparquet)
 SCHEMA <- "fs_afladagbok"
 dictionary   <- read_parquet("data/dictionary.parquet") |> filter(schema == SCHEMA)
 gear_mapping <- read_parquet("data/gear/gear_mapping.parquet") |> filter(version == "new")
+harbours <-
+  read_parquet("data/ports/hafnarnumerakerfid.parquet") |>
+  select(hid_new = hafnarnumer_id, port, hid) |>
+  drop_na()
 
 # Sources known to encode coordinates in DDM (degrees-decimal-minutes).
 # All others default to DMS classification via row-level signal.
@@ -25,19 +29,27 @@ DDM_SOURCES <- c(
 # Built first: `source` (uppruni) is a trip-level column in ws_veidiferd and
 # is needed for coordinate classification in ws_veidi below.
 trip <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidiferd.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_veidiferd.parquet") |>
   wk_translate(dictionary) |>
   rename(.tid = id) |>
   mutate(n_crew = NA_integer_, schema = SCHEMA) |>
   select(.tid, vid, T1, hid1, T2, hid2, n_crew, source, schema)
-
+trip <- trip |>
+  rename(hid_new = hid1) |>
+  left_join(harbours,
+            by = join_by(hid_new == hid_new)) |>
+  select(.tid, vid, T1, hid1 = hid, T2, hid2, n_crew, source, schema) |>
+  rename(hid_new = hid2) |>
+  left_join(harbours,
+            by = join_by(hid_new == hid_new)) |>
+  select(.tid, vid, T1, hid1, T2, hid2 = hid, port, n_crew, source, schema)
 # Source (ws_veidi) -----------------------------------------------------------
 # Translate columns, join trip-level `source` for coordinate classification,
 # then convert raw integer coordinates to decimal degrees.
 # After this block `source` has: .sid .tid gid t1 t3 t4 lon1 lat1 lon2 lat2
 # z1 z2 n_lost date schema.
 source <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidi.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_veidi.parquet") |>
   wk_translate(dictionary) |>
   rename(.sid = id) |>
   select(-c(breytt, skraningartimi, snt, veidarfaeri_efni, athugasemd_txt)) |>
@@ -140,31 +152,31 @@ station <-
 
 ## Mobile (ws_dragnot_varpa: OTB / OTM / SDN) ----------------------------------
 aux_mobile <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_dragnot_varpa.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_dragnot_varpa.parquet") |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear %in% c("OTB", "OTM", "SDN")), by = ".sid")
 
 ## Dredge (ws_plogur: DRB) ----------------------------------------------------
 aux_dredge <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_plogur.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_plogur.parquet") |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "DRB"), by = ".sid")
 
 ## Static (ws_linanethandf: LLS / GNS / GND / LHM) ----------------------------
 aux_static <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_linanethandf.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_linanethandf.parquet") |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear %in% c("LLS", "GNS", "GND", "LHM")), by = ".sid")
 
 ## Traps (ws_gildra: FPO) -----------------------------------------------------
 aux_trap <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_gildra.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_gildra.parquet") |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "FPO"), by = ".sid")
 
 ## Purse seine (ws_hringn: PS) -------------------------------------------------
 aux_seine <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_hringn.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_hringn.parquet") |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "PS"), by = ".sid")
 
@@ -297,7 +309,7 @@ fishing_sample <-
 
 # Catch -----------------------------------------------------------------------
 catch <-
-  read_parquet("data-raw/data-dump/fs_afladagbok/ws_afli.parquet") |>
+  read_parquet("data-dump/logbooks/fs_afladagbok/ws_afli.parquet") |>
   wk_translate(dictionary) |>
   select(.sid, sid, catch = magn) |>  # CHANGE DICTIONARY
   group_by(.sid, sid) |>
@@ -306,11 +318,11 @@ catch <-
   arrange(.sid, sid)
 
 # Export -----------------------------------------------------------------------
-trip           |> write_parquet("data/fs_afladagbok/trip.parquet")
-station        |> write_parquet("data/fs_afladagbok/station.parquet")
-fishing_sample |> write_parquet("data/fs_afladagbok/fishing_sample.parquet")
+trip           |> write_parquet("data-raw/logbooks/fs_afladagbok/trip.parquet")
+station        |> write_parquet("data-raw/logbooks/fs_afladagbok/station.parquet")
+fishing_sample |> write_parquet("data-raw/logbooks/fs_afladagbok/fishing_sample.parquet")
 
-catch          |> write_parquet("data/fs_afladagbok/catch.parquet")
+catch          |> write_parquet("data-raw/logbooks/fs_afladagbok/catch.parquet")
 
 
 # QC scratch (if FALSE) -------------------------------------------------------

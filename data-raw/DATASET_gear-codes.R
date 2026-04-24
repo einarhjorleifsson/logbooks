@@ -23,11 +23,14 @@ library(tidyverse)
 library(nanoparquet)
 
 
-asfis <- read_parquet("data-raw/data-dump/gear/asfis.parquet") |> rename(latin = scientific_name)
+asfis <- read_parquet("data-dump/species/asfis.parquet") |> rename(latin = scientific_name)
 # create table -----------------------------------------------------------------
 
-read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
-  pull(veidarf) |> unique() |> sort()
+
+
+
+
+
 
 
 # The `map` column is a one-way canonical lookup between versions:
@@ -131,11 +134,11 @@ gear_mapping |>
 gear_mapping |>
   nanoparquet::write_parquet("data/gear/gear_mapping.parquet")
 # check: have I captured all gears in the logbook data? ------------------------
-read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
   count(gid = veidarf) |>
   left_join(gear_mapping |> filter(version == "old")) |>
   knitr::kable()
-read_parquet("data-raw/data-dump/fs_afladagbok/ws_veidi.parquet") |>
+read_parquet("data-dump/logbooks/fs_afladagbok/ws_veidi.parquet") |>
   count(gid = veidarfaeri_id) |>
   left_join(gear_mapping |> filter(version == "new")) |>
   knitr::kable()

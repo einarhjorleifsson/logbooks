@@ -29,6 +29,8 @@ website:
             href: afli-backentry.qmd
       - text: Coordinates
         href: wacky_recovery.qmd
+      - text: Landings Match
+        href: landings-match.qmd
       - text: Notes
         href: ramb-list.qmd
       - icon: github

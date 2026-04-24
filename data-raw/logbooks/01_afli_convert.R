@@ -1,6 +1,6 @@
 # Create standard summary tables
-# Input:  data-raw/data-dump/afli/{stofn,toga,lineha,gildra,hringn,afli,rafr_stofn}.parquet
-# Output: data/afli/{trip,station,fishing_sample,sensor,catch,aggregate}.parquet
+# Input:  data-dump/logbooks/afli/{stofn,toga,lineha,gildra,hringn,afli,rafr_stofn}.parquet
+# Output: data-rqw/logbooks/afli/{trip,station,fishing_sample,sensor,catch,aggregate}.parquet
 
 # Setup -----------------------------------------------------------------------
 library(whack) # pak::pak("einarhjorleifsson/whack")
@@ -11,13 +11,16 @@ library(nanoparquet)
 SCHEMA <- "afli"
 dictionary   <- read_parquet("data/dictionary.parquet") |> filter(schema == SCHEMA)
 gear_mapping <- read_parquet("data/gear/gear_mapping.parquet") |> filter(version == "old")
-
+harbours <-
+  read_parquet("data/ports/hafnarnumerakerfid.parquet") |>
+  select(hid, port) |>
+  drop_na()
 # eytt flag: records officially deleted in Oracle (eytt=1 in rafr_stofn).
 # 16,912 such records exist; they were imported into stofn but later deleted.
 # eytt_deleted = TRUE  → deleted in Oracle; treat with caution / exclude.
 # eytt_deleted = FALSE → active in Oracle (rafr_ era, 2003–2020).
 # eytt_deleted = NA    → not in rafr_ (paper era, or 2020–2022 direct-load).
-eytt_ref <- read_parquet("data-raw/data-dump/afli/rafr_stofn.parquet") |>
+eytt_ref <- read_parquet("data-dump/logbooks/afli/rafr_stofn.parquet") |>
   select(visir, eytt) |>
   mutate(eytt_deleted = eytt == 1L) |>
   select(visir, eytt_deleted)
@@ -26,7 +29,7 @@ eytt_ref <- read_parquet("data-raw/data-dump/afli/rafr_stofn.parquet") |>
 # No explicit trip table in this schema; .tid derived as min(.sid) per
 # (vid, T2, hid2). T1 is the minimum fishing date within the derived trip.
 source <-
-  read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+  read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
   wk_translate(dictionary) |>
   filter(!is.na(date)) |>                        # 40 records have NA date
   # Remove ~41k monthly aggregate records (nephrops, shrimp, d-seine); these
@@ -61,8 +64,9 @@ stofn_gear <- source |>
 trip <-
   source |>
   select(.tid, vid, T1, hid1, T2, hid2, n_crew, schema) |>
-  distinct(.tid, vid, T1, hid1, T2, hid2, .keep_all = TRUE)
-
+  distinct(.tid, vid, T1, hid1, T2, hid2, .keep_all = TRUE) |>
+  left_join(harbours, by = join_by(hid2 == hid))
+#trip |> count(hid2, port) |> knitr::kable()
 # Station (spatial/temporal envelope) -----------------------------------------
 station <-
   source |>
@@ -76,14 +80,14 @@ station <-
 
 ## Mobile (toga: OTB / OTM / DRB / SDN) ---------------------------------------
 aux_mobile <-
-  read_parquet("data-raw/data-dump/afli/toga.parquet") |>
+  read_parquet("data-dump/logbooks/afli/toga.parquet") |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear %in% c("DRB", "OTB", "OTM", "SDN")),
              by = ".sid")
 
 ## Static (lineha: LLS / GNS / GND / LHM) -------------------------------------
 aux_static <-
-  read_parquet("data-raw/data-dump/afli/lineha.parquet") |>
+  read_parquet("data-dump/logbooks/afli/lineha.parquet") |>
   rename(.sid = visir) |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear %in% c("LLS", "GNS", "GND", "LHM")),
@@ -91,14 +95,14 @@ aux_static <-
 
 ## Trap (gildra: FPO) ----------------------------------------------------------
 aux_trap <-
-  read_parquet("data-raw/data-dump/afli/gildra.parquet") |>
+  read_parquet("data-dump/logbooks/afli/gildra.parquet") |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear == "FPO"), by = ".sid") |>
   mutate(duration_m = duration_h * 60)
 
 ## Seine / ring net (hringn: PS) -----------------------------------------------
 aux_seine <-
-  read_parquet("data-raw/data-dump/afli/hringn.parquet") |>
+  read_parquet("data-dump/logbooks/afli/hringn.parquet") |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear == "PS"), by = ".sid")
 
@@ -311,7 +315,7 @@ sensor <-
 
 # Catch -----------------------------------------------------------------------
 catch <-
-  read_parquet("data-raw/data-dump/afli/afli.parquet") |>
+  read_parquet("data-dump/logbooks/afli/afli.parquet") |>
   wk_translate(dictionary, "messy", "clean") |>
   select(.sid, sid, catch) |>
   group_by(.sid, sid) |>
@@ -325,7 +329,7 @@ catch <-
 # date is mid-month (15th); no coordinates available; duration_m is total
 # aggregated tow time for the period (not a single-haul value).
 agg_stofn <-
-  read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+  read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
   wk_translate(dictionary) |>
   filter(!is.na(date)) |>
   filter(
@@ -343,12 +347,12 @@ agg_stofn <-
   select(.sid, vid, gid, date, sq, ssq, agg_type)
 
 agg_catch <-
-  read_parquet("data-raw/data-dump/afli/afli.parquet") |>
+  read_parquet("data-dump/logbooks/afli/afli.parquet") |>
   wk_translate(dictionary, "messy", "clean") |>
   select(.sid, sid, catch) |>
   inner_join(agg_stofn, by = ".sid") |>
   left_join(
-    read_parquet("data-raw/data-dump/afli/toga.parquet") |>
+    read_parquet("data-dump/logbooks/afli/toga.parquet") |>
       wk_translate(dictionary) |>
       select(.sid, duration_m),
     by = ".sid"
@@ -358,12 +362,12 @@ agg_catch <-
 
 
 # Export -----------------------------------------------------------------------
-trip           |> write_parquet("data/afli/trip.parquet")
-station        |> write_parquet("data/afli/station.parquet")
-fishing_sample |> write_parquet("data/afli/fishing_sample.parquet")
-sensor         |> write_parquet("data/afli/sensor.parquet")
-catch          |> write_parquet("data/afli/catch.parquet")
-agg_catch      |> write_parquet("data/afli/aggregate.parquet")
+trip           |> write_parquet("data-raw/logbooks/afli/trip.parquet")
+station        |> write_parquet("data-raw/logbooks/afli/station.parquet")
+fishing_sample |> write_parquet("data-raw/logbooks/afli/fishing_sample.parquet")
+sensor         |> write_parquet("data-raw/logbooks/afli/sensor.parquet")
+catch          |> write_parquet("data-raw/logbooks/afli/catch.parquet")
+agg_catch      |> write_parquet("data-raw/logbooks/afli/aggregate.parquet")
 
 
 # QC scratch (if FALSE) -------------------------------------------------------

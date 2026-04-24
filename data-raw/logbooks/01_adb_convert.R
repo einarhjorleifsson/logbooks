@@ -1,6 +1,6 @@
 # Create standard summary tables
-# Input: data-raw/data-dump/adb/*.parquet
-# Outpt: data/adb/*.parquet
+# Input: data-dump/logbooks/adb/*.parquet
+# Outpt: data-raw/logbooks/adb/*.parquet
 
 library(whack) # pak::pak("einarhjorleifsson/whack)
 library(geo)
@@ -13,14 +13,14 @@ dictionary <- read_parquet("data/dictionary.parquet") |>
   filter(schema == SCHEMA)
 
 # trip -------------------------------------------------------------------------
-trip <- read_parquet("data-raw/data-dump/adb/trip_v.parquet") |>
+trip <- read_parquet("data-dump/logbooks/adb/trip_v.parquet") |>
   wk_translate(dictionary) |>
   select(.tid, vid, T1, hid1, T2, hid2) |>
   mutate(schema = SCHEMA)
 
 # base -------------------------------------------------------------------------
 base <-
-  read_parquet("data-raw/data-dump/adb/station_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/station_v.parquet") |>
   wk_translate(dictionary) |>
   mutate(date = as_date(coalesce(t1, t3, t4))) |>
   select(.tid, .sid, gid, date,
@@ -36,7 +36,7 @@ base <-
 
 ## mobile (trawl / seine-net) --------------------------------------------------
 mobile_aux <-
-  read_parquet("data-raw/data-dump/adb/trawl_and_seine_net_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/trawl_and_seine_net_v.parquet") |>
   wk_translate(dictionary) |>                  # station_id → .sid; bridle_length → sweeps
   inner_join(base |> select(.sid, gid, t3, t4), by = ".sid") |>
   mutate(
@@ -58,7 +58,7 @@ mobile_aux <-
 ## dredge (plógur) -------------------------------------------------------------
 ##   dredge_v covers gid 5, 6, 7, 51, 53 that are absent from trawl_and_seine_net_v
 dredge_aux <-
-  read_parquet("data-raw/data-dump/adb/dredge_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/dredge_v.parquet") |>
   wk_translate(dictionary) |>
   inner_join(base |> select(.sid, t3, t4), by = ".sid") |>
   mutate(
@@ -71,7 +71,7 @@ dredge_aux <-
 
 ## static (longline / gillnet / handline) --------------------------------------
 static_aux <-
-  read_parquet("data-raw/data-dump/adb/line_and_net_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/line_and_net_v.parquet") |>
   wk_translate(dictionary) |>
   inner_join(base |> select(.sid, gid, t3, t4), by = ".sid") |>
   mutate(
@@ -93,7 +93,7 @@ static_aux <-
 
 ## traps -----------------------------------------------------------------------
 trap_aux <-
-  read_parquet("data-raw/data-dump/adb/trap_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/trap_v.parquet") |>
   wk_translate(dictionary) |>
   inner_join(base |> select(.sid, t3, t4), by = ".sid") |>
   mutate(
@@ -105,7 +105,7 @@ trap_aux <-
 
 ## seine / surrounding net -----------------------------------------------------
 seine_aux <-
-  read_parquet("data-raw/data-dump/adb/surrounding_net_v.parquet") |>
+  read_parquet("data-dump/logbooks/adb/surrounding_net_v.parquet") |>
   wk_translate(dictionary) |>
   inner_join(base |> select(.sid), by = ".sid") |>
   mutate(effort = 1, effort_unit = "setting") |>
@@ -123,7 +123,7 @@ station <-
 
 # catch ------------------------------------------------------------------------
 catch <-
-  read_parquet("data-raw/data-dump/adb/catch.parquet") |>
+  read_parquet("data-dump/logbooks/adb/catch.parquet") |>
   wk_translate(dictionary) |>
   rename(.sid = fishing_station_id,
          sid = species_no,
@@ -137,6 +137,6 @@ catch <-
   arrange(.sid, sid)
 
 # save -------------------------------------------------------------------------
-trip    |> write_parquet("data/adb/trip.parquet")
-station |> rename(gid_old = gid) |> write_parquet("data/adb/station.parquet")
-catch   |> write_parquet("data/adb/catch.parquet")
+trip    |> write_parquet("data-raw/logbooks/adb/trip.parquet")
+station |> rename(gid_old = gid) |> write_parquet("data-raw/logbooks/adb/station.parquet")
+catch   |> write_parquet("data-raw/logbooks/adb/catch.parquet")

@@ -36,6 +36,14 @@ library(lubridate)
 library(orit)
 
 ORIT_TYPES <- orit::hr_types$type   # all NMEA types orit can parse
+i <- !is.na(ORIT_TYPES)
+ORIT_TYPES <- ORIT_TYPES[i]
+any(i)
+
+for(i in 1:length(ORIT_TYPES)) {
+  i <- grepl("GGA", d$sending)
+  if(any(i)) print(ORIT_TYPES[i])
+}
 
 # ------------------------------------------------------------------------------
 # Step 1 — extract_nmea(): one XML submission → flat NMEA rows
