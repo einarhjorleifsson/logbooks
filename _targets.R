@@ -55,7 +55,8 @@ list(
   tar_target(script_afli,  "data-raw/logbooks/01_afli_convert.R",          format = "file"),
   tar_target(script_fs,    "data-raw/logbooks/01_fs_afladagbok_convert.R", format = "file"),
   tar_target(script_adb,   "data-raw/logbooks/01_adb_convert.R",           format = "file"),
-  tar_target(script_merge, "data/logbooks.R",                 format = "file"),
+  tar_target(script_xml,   "data-raw/logbooks/01_afladagb_xml.R",          format = "file"),
+  tar_target(script_merge, "data/logbooks.R",                               format = "file"),
 
 
   # ── Stage 0b: Lookup tables ──────────────────────────────────────────────────
@@ -132,6 +133,22 @@ list(
       c("data-raw/logbooks/adb/trip.parquet",
         "data-raw/logbooks/adb/station.parquet",
         "data-raw/logbooks/adb/catch.parquet")
+    },
+    format = "file"
+  ),
+
+
+  # ── Stage 1b: XML sensor extraction ─────────────────────────────────────────
+  # Independent of the convert scripts; runs in parallel with Stage 1.
+  # Reads afladagb_xml_mottaka directly; no dictionary or gear deps.
+
+  tar_target(
+    name    = xml_sensor_files,
+    command = {
+      script_xml
+      source("data-raw/logbooks/01_afladagb_xml.R")
+      c("data-raw/logbooks/afli/sensor_xml_nmea.parquet",
+        "data-raw/logbooks/afli/sensor_xml_track.parquet")
     },
     format = "file"
   ),

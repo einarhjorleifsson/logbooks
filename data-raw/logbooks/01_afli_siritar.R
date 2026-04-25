@@ -1,11 +1,11 @@
 # Input:
-#  data-raw/data-dump/afli/sjalfvirkir_maelar.parquet
-#  data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet
-#  data/merged/trip.parquet           — to get vid and filter to afli schema
-#  data/merged/fishing_sample.parquet — to map .sid → .tid
-#  data/trail                         — AIS positions, copy of /u3/geo/fishydata
+#  data-dump/logbooks/afli/sjalfvirkir_maelar.parquet
+#  data-dump/logbooks/afli/rafr_sjalfvirkir_maelar.parquet
+#  data-raw/logbooks/trip.parquet           — to get vid and filter to afli schema
+#  data-raw/logbooks/fishing_sample.parquet — to map .sid → .tid
+#  data/trail                           — AIS positions, copy of /u3/geo/fishydata
 # Output:
-#  data/afli/sensor_GPS.parquet
+#  data-raw/logbooks/afli/sensor_GPS.parquet
 
 # Summary:
 #  Wacky coordinates in the afli GPS logger tables (sjalfvirkir_maelar,
@@ -24,8 +24,8 @@ library(duckdbfs)
 library(tidyverse)
 
 # the two datasources are nearly identical; gps1 covers a longer timespan
-gps1 <- read_parquet("data-raw/data-dump/afli/sjalfvirkir_maelar.parquet")
-gps2 <- read_parquet("data-raw/data-dump/afli/rafr_sjalfvirkir_maelar.parquet")
+gps1 <- read_parquet("data-dump/logbooks/afli/sjalfvirkir_maelar.parquet")
+gps2 <- read_parquet("data-dump/logbooks/afli/rafr_sjalfvirkir_maelar.parquet")
 
 # build station-level lookup: .sid → .tid + vid, afli schema only
 # drop schema from fishing_sample select to avoid column duplication

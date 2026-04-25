@@ -25,6 +25,7 @@ format (`trip`, `station`, `fishing_sample`, `catch` parquet files):
 | `adb` | `data-raw/logbooks/01_adb_convert.R` | `data-raw/logbooks/adb/*.parquet` | not in merge |
 | **merged** | `data/logbooks.R` | `data/logbooks/*.parquet` | done |
 | **siritar** | `data-raw/logbooks/01_afli_siritar.R` | `data-raw/logbooks/afli/sensor_GPS.parquet` | in progress |
+| **xml sensors** | `data-raw/logbooks/01_afladagb_xml.R` | `data-raw/logbooks/afli/sensor_xml_nmea.parquet`, `sensor_xml_track.parquet` | done |
 
 `data-raw/logbooks/01_afli_siritar.R` — AIS-based wacky coordinate recovery for `sjalfvirkir_maelar`/`rafr_sjalfvirkir_maelar`. Interpolates corrected lon/lat from AIS tracks (`data/trail`) onto GPS logger timestamps; retains original wacky coords as `w_lon`/`w_lat`. `dt_sec` is seconds between the two AIS fixes that bracket each GPS timestamp (the actual interpolation interval; `NA` for extrapolated records). `approx(..., rule = 2)`: GPS timestamps outside the AIS window are extrapolated from the nearest AIS endpoint; `NA` lon/lat only for vessels with no AIS in that year.
 
@@ -71,8 +72,8 @@ Pelagic catch accounting:
 
 Full schema documentation in `AGENTS_data_sources.md`.
 
-- `data-raw/data-dump/fs_afladagbok/` — 8 parquet tables; `ws_veidiferd` (trips), `ws_veidi` (stations), `ws_afli` (catch), plus 5 gear-detail tables
-- `data-raw/data-dump/afli/` — 96 tables; key ones for convert: `stofn` (6.9 M stations), `afli` (catch), `toga`, `lineha`, `gildra`, `hringn`; also notable: `rafr_sjalfvirkir_maelar` (23.6 M logger positions, **wacky coordinates**)
+- `data-dump/logbooks/fs_afladagbok/` — 8 parquet tables; `ws_veidiferd` (trips), `ws_veidi` (stations), `ws_afli` (catch), plus 5 gear-detail tables
+- `data-dump/logbooks/afli/` — 96 tables; key ones for convert: `stofn` (6.9 M stations), `afli` (catch), `toga`, `lineha`, `gildra`, `hringn`; also notable: `rafr_sjalfvirkir_maelar` (23.6 M logger positions, **wacky coordinates**); `afladagb_xml_mottaka` (483k XML batch submissions — source for xml sensor scripts)
 - `data/gear/gear_mapping.parquet` — maps old ↔ new gear codes; ICES metier vocabulary; built by `data-raw/DATASET_gear-codes.R`
 - Column renaming via `wk_translate()` using `data/dictionary.parquet` (~154 entries; built by `data-raw/DATASET_dictionary.R`)
 
