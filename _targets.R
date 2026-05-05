@@ -54,9 +54,10 @@ list(
   tar_target(script_gear,  "data-raw/DATASET_gear-codes.R",      format = "file"),
   tar_target(script_afli,  "data-raw/logbooks/01_afli_convert.R",          format = "file"),
   tar_target(script_fs,    "data-raw/logbooks/01_fs_afladagbok_convert.R", format = "file"),
-  tar_target(script_adb,   "data-raw/logbooks/01_adb_convert.R",           format = "file"),
-  tar_target(script_xml,   "data-raw/logbooks/01_afladagb_xml.R",          format = "file"),
-  tar_target(script_merge, "data/logbooks.R",                               format = "file"),
+  tar_target(script_adb,            "data-raw/logbooks/01_adb_convert.R",          format = "file"),
+  tar_target(script_merge,          "data/logbooks/logbooks.R",                             format = "file"),
+  tar_target(script_landings,       "data/landings/landings.R",                             format = "file"),
+  #tar_target(script_landings_match, "data/logbooks-landings_match.R",              format = "file"),
 
 
   # ── Stage 0b: Lookup tables ──────────────────────────────────────────────────
@@ -138,22 +139,6 @@ list(
   ),
 
 
-  # ── Stage 1b: XML sensor extraction ─────────────────────────────────────────
-  # Independent of the convert scripts; runs in parallel with Stage 1.
-  # Reads afladagb_xml_mottaka directly; no dictionary or gear deps.
-
-  tar_target(
-    name    = xml_sensor_files,
-    command = {
-      script_xml
-      source("data-raw/logbooks/01_afladagb_xml.R")
-      c("data-raw/logbooks/afli/sensor_xml_nmea.parquet",
-        "data-raw/logbooks/afli/sensor_xml_track.parquet")
-    },
-    format = "file"
-  ),
-
-
   # ── Stage 2: Merge ───────────────────────────────────────────────────────────
   # Runs after all three conversions are complete.  Depends on afli_files,
   # fs_files, and adb_files — if any of those parquet files change (e.g. because
@@ -167,12 +152,42 @@ list(
       adb_files
       gear_mapping_file
       script_merge
-      source("data/logbooks.R")
+      source("data/logbooks/logbooks.R")
       c("data/logbooks/trip.parquet",
         "data/logbooks/station.parquet",
         "data/logbooks/catch.parquet")
     },
     format = "file"
+  ),
+
+
+  # ── Stage 3: Landings ────────────────────────────────────────────────────────
+
+  tar_target(
+    name    = landings_files,
+    command = {
+      script_landings
+      source("data/landings/landings.R")
+      c("data/landings/landings.parquet",
+        "data/landings/catch.parquet")
+    },
+    format = "file"
   )
+
+
+  # ── Stage 4: Landings match ──────────────────────────────────────────────────
+  # Builds a .tid → .lid crosswalk between merged logbook trips and the landing
+  # register.  Depends on merged_files (trip/station/catch) being up to date.
+
+  # tar_target(
+  #   name    = landings_match_file,
+  #   command = {
+  #     merged_files                                 # trip/station/catch must exist
+  #     script_landings_match
+  #     source("data/logbooks-landings_match.R")
+  #     "data/logbooks/lid_map.parquet"
+  #   },
+  #   format = "file"
+  # )
 
 )

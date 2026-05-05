@@ -1,0 +1,221 @@
+---
+title: "On AIS data"
+editor: source
+---
+
+::: {.callout-note title="TODO"}
+Run a simulation test using a synthetic dataset sized close to the median anticipated EU member-state fleet (~1,100 vessels at 1-minute resolution, one year), and record wall-clock time and peak memory on representative hardware. This would give a concrete benchmark to support the scalability claims made in the computational approach section.
+:::
+
+## Data sources
+
+There are four AIS / GPS sources consolidated in this project:
+
+| Source | Raw location | Notes |
+|------------------------|------------------------|------------------------|
+| **STK** | `data-dump/ais/stk/trail` | Iceland's domestic AIS receiver network |
+| **ASTD** | `data-dump/ais/astd` → `data-raw/ais/astd` | Commercial AIS provider; global coverage |
+| **ASTDB** | `data-dump/ais/astdB` → `data-raw/ais/astdB` | Second commercial AIS provider (Class B) |
+| **GPS (wacky recovery)** | `data-raw/logbooks/afli/sensor_GPS.parquet` | AIS-corrected onboard GPS logger positions |
+
+An additional EmodNet snapshot (Iceland, 2017 only) is included as a minor supplement.
+
+## Pre-processing: ZIP to parquet (ASTD and ASTDB)
+
+The STK data arrive already as partitioned parquet from the Oracle dump. The two commercial providers require a conversion step before the consolidation script can use them.
+
+### ASTD — `data-raw/ais/astd_zip-to-parquet.R`
+
+ASTD delivers monthly ZIP archives, each containing a semicolon-delimited CSV of all-flag global AIS pings. The script converts these to Hive-partitioned parquet at `data-raw/ais/astd/year=YYYY/month=MM/`.
+
+Key challenges handled:
+
+-   **Schema drift across months.** Column presence and inferred types vary over time. A sniff pass reads the first 10,000 rows of each ZIP without full extraction, builds a canonical schema (one row per column), and resolves type conflicts using a hierarchy (logical \< integer \< numeric; Date \< POSIXct; anything mixed → character). Months with columns absent in the canonical set get `NULL` placeholders so all parquet files share a consistent schema.
+-   **Timestamp format change.** Files from November 2023 through April 2024 use `MM/DD/YYYY HH:MM:SS` instead of ISO 8601. DuckDB's auto-detect misparses these (it guesses DD/MM/YYYY from early rows, then fails when months exceed 12). The affected months are hard-coded and passed an explicit `timestampformat`.
+-   **No data in R memory.** Each ZIP is extracted to a temp directory; DuckDB's `COPY … TO` converts directly from CSV to ZSTD-compressed parquet. R never holds the row data.
+
+### ASTDB — `data-raw/ais/astdB_zip-to-parquet.R`
+
+ASTDB delivers a single large ZIP containing daily `.gz` files (Class B AIS, global). The script unpacks the archive, reads each daily file with explicit column types via `readr`, and writes Hive-partitioned parquet to `data-raw/ais/astdB/` using `duckdbfs::write_dataset()`. Two problematic daily files (2019-02-12, 2021-06-12) are excluded.
+
+## Consolidation pipeline — `data/ais-data-consolidation.R`
+
+Once all sources are in parquet, the consolidation script merges them into a single unified track dataset at `data/trail/`. The logical steps are captured in the pseudocode below, followed by a brief description of each step.
+
+``` r
+# 1. Load reference tables (lazy — nothing read into memory yet)
+vid_lookup <- open_dataset("stk_vessel_match.parquet")   # mid → vid, with date ranges
+ports      <- open_dataset("ports.gpkg")                 # harbour polygons
+
+# 2. Per source: filter to national vessels, harmonise to a common schema
+stk <- open_dataset("stk/trail/") |>
+  inner_join(vid_lookup, by = interval_join(mid, time, d1, d2)) |>
+  select(vid, mmsi, time, lon, lat, speed, heading)
+
+astd <- open_dataset("astd/") |>
+  filter(mmsi prefix == "251") |>                        # Iceland's MID
+  inner_join(vid_lookup, by = "mmsi") |>
+  select(vid, mmsi, time, lon, lat, speed, heading)
+
+# ... repeat for astdB, wacky GPS, EmodNet ...
+
+# 3. Union all sources; tag each ping with its origin
+d <- union_all(
+  stk   |> mutate(provider = "stk"),
+  astd  |> mutate(provider = "astd"),
+  ...
+)
+
+# 4. Spatial join: tag each ping with a harbour ID (NA = at sea)
+d <- d |>
+  mutate(geom = ST_POINT(lon, lat)) |>
+  spatial_join(ports, by = "st_intersects", join = "left")
+
+# 5. Write Hive-partitioned parquet — DuckDB executes everything above here
+d |>
+  mutate(year = year(time)) |>
+  group_by(year) |>            # swap for group_by(year, month) or group_by(year, week)
+  write_dataset("data/trail/") #   to create finer partitions — no loop change needed
+```
+
+The pipeline is fully lazy until step 5: `open_dataset()` and the subsequent joins and filters build a query plan; `write_dataset()` is the single trigger that causes DuckDB to execute the entire graph. No intermediate results are materialised in R memory.
+
+**Partition granularity** is controlled entirely by the `group_by()` in the final step. Partitioning by year is sufficient for Iceland-scale data. For larger national fleets, switching to `group_by(year, month)` — or even `group_by(year, week(time))` — requires no additional loop or structural change; DuckDB handles the fan-out automatically. Finer partitions also speed up downstream queries that target short time windows, since partition pruning will skip more files.
+
+The five steps in detail:
+
+1.  **Filter to national vessels.** Each source uses a different vessel identifier. STK pings are joined against `stk_vessel_match.parquet` (mid → vid) using a temporal interval join — necessary because a `mid` can be reassigned to a different vessel over time. ASTD and ASTDB are filtered to MMSI prefix `251` (Iceland) and joined to the same vid lookup via MMSI.
+
+2.  **Harmonise schema.** Columns are aligned across sources to a common set: `vid`, `mmsi`, `time`, `lon`, `lat`, `speed`, `heading`, `cog`, `provider`. Speed is not directly available in all feeds; where absent it is derived from consecutive-ping distance and time.
+
+3.  **Spatial harbour tagging.** A `ST_INTERSECTS` spatial join against a ports polygon layer appends a `pid` harbour code to each ping. Pings at sea get `pid = NA`.
+
+4.  **Write partitioned parquet.** The union of all sources is written to `data/trail/` partitioned by year. The output is accessed lazily via:
+
+``` r
+duckdbfs::open_dataset("data/trail")
+```
+
+## Data volumes
+
+| Dataset | Rows | Notes |
+|------------------------|------------------------|------------------------|
+| ASTD (raw, all flags) | \~2.8 billion | Monthly ZIPs, 2013– |
+| ASTDB (raw, all flags) | \~901 million | Single ZIP, 2014–2024 |
+| EmodNet (raw, Iceland only) | \~19.6 million | 2017 snapshot |
+| STK (raw, all mids) | see `data-dump/ais/stk/trail` | Includes non-vessels |
+| Consolidated `data/trail` (Icelandic vessels only) | \~566 million | 2007–2026 |
+
+Filtering to Icelandic vessels reduces the combined commercial-feed input by roughly 85%.
+
+## Computational approach: parquet + DuckDB on a laptop
+
+The WGSFD 2025 draft (section 4.2.6) argues that high-resolution (≤10 min) vessel tracking data constitute a Big Data problem — one that "moves the problem from conventional data management" toward distributed, cloud-scalable architectures with stream processing, citing the three V's of Big Data (Volume, Velocity, Variety). The implication is that national RDBMS solutions are inadequate and that petabyte-scale cloud infrastructure is necessary.
+
+The pipeline here tells a more nuanced story. The entire consolidation — joining roughly 3.7 billion raw pings from three providers against vessel match tables, filtering to Icelandic vessels, tagging harbours with a spatial join, and writing \~566 million rows of partitioned parquet output — **ran on a MacBook in a matter of minutes**, using only R and DuckDB via the `duckdbfs` package. No cluster, no cloud object store, no stream processor.
+
+The key insight is that **DuckDB + partitioned parquet occupies a practical middle ground** between a traditional RDBMS and a full distributed data platform:
+
+-   DuckDB's columnar, vectorised execution engine processes data in parallel across CPU cores without ever loading the full dataset into memory. Complex spatiotemporal queries that would take hours in PostgreSQL or Oracle finish in seconds to minutes.
+-   Hive-partitioned parquet (by year, in this case) enables partition pruning: a query targeting a single year touches only that year's files.
+-   The entire stack is file-based and portable — no server to provision, no cloud account to manage, no per-query billing.
+
+A genuine cloud architecture (e.g., Spark on object storage, BigQuery, Snowflake) introduces real overhead that is not free:
+
+-   **Operational complexity**: cluster provisioning, IAM permissions, VPC configuration, orchestration (Airflow, etc.) — each a specialised skill set that requires dedicated engineering time to set up, maintain, and debug.
+-   **Latency**: spinning up a Spark job or routing a query through a cloud data warehouse adds cold-start overhead that can dominate moderate-sized analytical workloads where a local DuckDB query would return in seconds.
+-   **Cost**: cloud compute and storage are billed per use; data egress fees apply when moving data between services or back to a local environment for visualisation and modelling.
+-   **Governance and compliance overhead**: sensitive fishing vessel tracking data moving through third-party cloud infrastructure raises data residency and access-control questions that a local pipeline sidesteps entirely.
+
+None of this means cloud tools are wrong — at truly national or multi-national scale with real-time ingestion requirements, they become necessary. But for a national fisheries AIS archive that is updated periodically rather than continuously, the WGSFD framing overstates the computational threshold. The question is at what scale the laptop-to-workstation approach breaks down.
+
+### Putting EU fleet volumes in context
+
+The table above reports the number of registered fishing vessels per EU member state. Assuming every vessel transmits at a 1-minute interval 24 hours a day, 365 days a year — a theoretical ceiling — we can estimate the anticipated annual ping volume per country and compare it against the Iceland dataset processed here.
+
+```{r}
+#| label: tbl-eu-pings
+#| echo: false
+#| message: false
+library(tibble)
+library(dplyr)
+library(knitr)
+
+mins_per_year  <- 365.25 * 24 * 60
+iceland_peak   <- 71991195   # busiest single year in data/trail
+
+eu <- tribble(
+  ~Country, ~N,
+  "BEL",      60,  "BGR",     106,  "CYP",     736,  "DEU",    1084,
+  "DNK",    1768,  "ESP",    8461,  "EST",    2067,  "FIN",    3257,
+  "FRA",    5957,  "GBR",    1089,  "GRC",   11401,  "HRV",    6195,
+  "IRL",    1944,  "ITA",   12277,  "LTU",     108,  "LVA",     167,
+  "MLT",     821,  "NLD",     763,  "POL",     783,  "PRT",    3541,
+  "ROU",      78,  "SVN",     131,  "SWE",     917
+) |>
+  mutate(
+    pings_yr_M = round(N * mins_per_year / 1e6, 0),
+    vs_iceland = paste0(round(pings_yr_M * 1e6 / iceland_peak, 0), "×")
+  )
+
+bind_rows(
+  eu,
+  tibble(Country = "**EU total**",
+         N = sum(eu$N),
+         pings_yr_M = sum(eu$pings_yr_M),
+         vs_iceland = paste0(round(sum(eu$pings_yr_M) * 1e6 / iceland_peak, 0), "×"))
+) |>
+  rename(
+    `Vessels (N)`            = N,
+    `Pings/year (M, 1-min)`  = pings_yr_M,
+    `vs. Iceland peak year`  = vs_iceland
+  ) |>
+  kable()
+```
+
+The busiest single year in Iceland's consolidated dataset contains **`r round(iceland_peak / 1e6, 0)` million pings** — a useful yardstick for what a national pipeline actually handles in a year. At 1-minute resolution, every EU member state except the very smallest (Belgium, Romania, Lithuania, Latvia, Slovenia) would exceed that volume; the larger fleets (Greece, Italy, Spain) would exceed it by 80–90×. The EU fleet as a whole would generate around **33.5 billion pings per year** — roughly **`r round(sum(eu$pings_yr_M) * 1e6 / iceland_peak, 0)`× Iceland's peak year**.
+
+This is where the scalability question becomes real — but the answer depends on who is doing the processing. If each member state processes its own national fleet independently, as is the natural governance model, the per-country volumes are far more tractable. Most EU member states have smaller fleets than Iceland's ~2,000 active vessels; even the larger fleets (Spain, Italy, Greece) would generate volumes in the low billions per year — comfortably handled by a well-provisioned workstation running DuckDB against partitioned parquet, much as demonstrated here. A centralised, EU-wide pipeline aggregating all member states into a single system at 1-minute resolution would genuinely require distributed infrastructure, but that scenario conflates a technical architecture question with a governance one. Decentralised national processing with harmonised output schemas is both technically lighter and arguably more appropriate given data sovereignty considerations.
+
+The WGSFD draft's concerns about **governance, interoperability, and data sensitivity** are entirely separate from the computational question and remain valid regardless of the storage architecture chosen.
+
+
+
+Table 3. Summary of the number of vessels reported in each segment, within the EUFR. `SSF.AIS` indicates the number of vessels officially carrying an AIS device; `SSF.AIS.GFW` shows how many of those are actually transmitting and have records in the GFW database. `N`: total vessels; `LSF`/`SSF`: large/small-scale fleet segment; `SSF9`: SSF vessels below 9 m LOA; `per.SSF`: % of fleet in SSF; `SSF.VMS`: SSF vessels with VMS; `SSF.ton`: total SSF tonnage (GT).
+
+```{r}
+#| label: tbl-ssf-ais
+#| echo: false
+library(tibble)
+library(knitr)
+
+d <- 
+  tribble(
+  ~Country, ~N,     ~LSF,  ~SSF,   ~SSF9,  ~per.SSF, ~SSF.VMS, ~per.SSF.VMS, ~SSF.AIS, ~per.SSF.AIS, ~SSF.ton, ~SSF.AIS.GFW, ~per.SSF.AIS.GFW,
+  "BEL",      60,     60,     0,      0,      0.0,       0,        NA,           0,        NA,            0,        NA,           NA,
+  "BGR",     106,     10,    96,     91,     90.6,       8,         8.3,          2,         2.1,         167,        1,            1.0,
+  "CYP",     736,     41,   695,    585,     94.4,       1,         0.1,          0,         0.0,        1671,       NA,           NA,
+  "DEU",    1084,    217,   867,    754,     80.0,       1,         0.1,          8,         0.9,        2225,        8,            0.9,
+  "DNK",    1768,    287,  1481,   1227,     83.8,       5,         0.3,          4,         0.3,        4338,        2,            0.1,
+  "ESP",    8461,   2223,  6238,   5061,     73.7,      59,         1.0,       3595,        57.6,       14696,      293,            4.7,
+  "EST",    2067,     33,  2034,   1917,     98.4,       0,         0.0,          0,         0.0,        2336,       NA,           NA,
+  "FIN",    3257,     54,  3203,   2914,     98.3,       0,         0.0,         17,         0.5,        7175,       NA,           NA,
+  "FRA",    5957,    773,  5184,   3720,     87.0,     675,        13.0,       3735,        72.1,       23402,      656,           12.7,
+  "GBR",    1089,    472,   617,    326,     56.7,      NA,        NA,           0,         0.0,        4121,       NA,           NA,
+  "GRC",   11401,    719, 10682,   9529,     93.7,    1488,        13.9,        115,         1.1,       22723,       NA,           NA,
+  "HRV",    6195,    362,  5833,   5384,     94.2,     292,         5.0,        111,         1.9,       11170,       24,            0.4,
+  "IRL",    1944,    243,  1701,   1229,     87.5,       1,         0.1,          0,         0.0,        6075,       NA,           NA,
+  "ITA",   12277,   3422,  8855,   7274,     72.1,       4,         0.1,        594,         6.7,       18328,       27,            0.3,
+  "LTU",     108,     19,    89,     79,     82.4,       1,         1.1,          0,         0.0,         201,       NA,           NA,
+  "LVA",     167,     46,   121,    115,     72.5,       0,         0.0,          0,         0.0,         168,       NA,           NA,
+  "MLT",     821,     56,   765,    683,     93.2,      45,         5.9,          1,         0.1,        1982,       NA,           NA,
+  "NLD",     763,    418,   345,    256,     45.2,       0,         0.0,         50,        14.5,         898,       45,           13.0,
+  "POL",     783,    148,   635,    462,     81.1,       3,         0.5,         76,        12.0,        2875,       64,           10.1,
+  "PRT",    3541,    496,  3045,   2674,     86.0,      39,         1.3,       1570,        51.6,        8173,       62,            2.0,
+  "ROU",      78,     14,    64,     40,     82.1,       0,         0.0,         63,        98.4,         228,       NA,           NA,
+  "SVN",     131,     15,   116,    102,     88.6,       8,         6.9,          2,         1.7,         295,       NA,           NA,
+  "SWE",     917,    123,   794,    540,     86.6,       8,         1.0,        154,        19.4,        3632,      159,           20.0
+)
+
+d |> knitr::kable()
+```

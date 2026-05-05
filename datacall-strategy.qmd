@@ -1,0 +1,375 @@
+---
+title: "Datacall spatial strategy"
+subtitle: "Assigning 566M AIS pings to ICES areas, depth classes, and seabed habitats"
+date: today
+format:
+  html:
+    code-fold: true
+    toc: true
+---
+
+## Background
+
+The ICES VMS datacall requires each AIS ping to be assigned to three spatial
+reference objects:
+
+| Object | Variable | Features |
+|---|---|---|
+| ICES statistical areas | `ices_area` | 66 |
+| ICES/GEBCO depth classes | `depth_class` | 9 |
+| EmodNet seabed habitats | `MSFD_BBHT` | 2.18 M |
+
+The AIS dataset (`data/trail`) contains ~566 million pings spanning 2007–2026.
+A naive spatial join of this many points against these polygon layers is not
+feasible — for reasons that differ across the three objects and that took some
+time to fully diagnose.
+
+This document describes what was tried, why each approach failed or was
+abandoned, and what was ultimately adopted. Reproducible examples of all
+approaches are collected in the appendix.
+
+## The three objects and their problems
+
+### ICES statistical areas (`ia`)
+
+66 polygons, **1.45 million vertices**. The polygons trace national coastlines
+at sub-metre detail in places — mean vertex spacing 63–68 m in the densest
+areas (Irish Sea, Celtic Sea). This is finer than AIS positional accuracy
+(10–100 m) and entirely unnecessary for assigning statistical area labels.
+The vertex density makes any direct per-ping geometry evaluation unworkable.
+
+### ICES/GEBCO depth classes
+
+9 polygons, **7.59 million vertices** — ~843,000 per feature. Same structural
+problem as `ia`, only more concentrated.
+
+### EmodNet seabed habitats (`eusm`)
+
+2.18 million polygons, ~107 million total vertices. The per-feature vertex
+count is actually low (~5 vertices each), but the feature count makes any
+per-feature operation impractical. Inspection of individual features reveals
+the origin: cell dimensions consistently 25–115 m, exactly 5 vertices per
+feature — the unmistakable signature of a raster polygonized into rectangles.
+The raster, had it been retained, would have been trivial to query.
+
+## The solution
+
+All three objects are rasterized to the **same 0.005° template** covering the
+ICES domain bounding box, then each raster cell centre is assigned an H3
+resolution-9 cell ID. The three resulting `(h3 → label)` lookup tables are
+joined into a single parquet file.
+
+```{r}
+#| eval: false
+library(sf)
+library(terra)
+library(tidyverse)
+library(h3)
+
+zoom <- 9L
+
+ia_sf      <- read_sf("data-raw/aux/ices_areas.fgb")
+ices_gebco <- readRDS("data-raw/aux/ICES_GEBCO.rds")
+
+# Common raster template: ICES domain at 0.005° (~500 m)
+r <- rast(ext(vect(ia_sf)), resolution = 0.005, crs = "EPSG:4326")
+```
+
+A single helper handles all three objects identically:
+
+```{r}
+#| eval: false
+# Encode a character column as integer, rasterize to template, extract H3
+# lookup. Returns a two-column tibble: h3, <label_col>.
+rast_to_h3 <- function(sf_obj, label_col, raster_template, res) {
+  levels_tbl <- tibble(label = sort(unique(sf_obj[[label_col]]))) |>
+    mutate(id = row_number())
+  sf_obj <- sf_obj |>
+    mutate(id = levels_tbl$id[match(.data[[label_col]], levels_tbl$label)])
+  r_out <- rasterize(vect(sf_obj), raster_template, field = "id", fun = "min") |>
+    trim()
+  as.data.frame(r_out, xy = TRUE, na.rm = TRUE) |>
+    as_tibble() |>
+    rename(lon = x, lat = y, id = 3) |>
+    left_join(levels_tbl, by = "id") |>
+    mutate(h3 = geo_to_h3(data.frame(lat, lon), res = res)) |>
+    count(h3, label) |>
+    slice_max(n, n = 1, with_ties = FALSE, by = h3) |>
+    select(h3, label) |>
+    rename(!!label_col := label)
+}
+
+# ICES statistical areas
+ia_h3 <- rast_to_h3(ia_sf, "Area_Full", r, zoom) |>
+  rename(ices_area = Area_Full)
+
+# ICES/GEBCO depth classes
+gebco_h3 <- rast_to_h3(ices_gebco, "depth", r, zoom) |>
+  rename(depth_class = depth)
+
+# eusm — validate and crop to ICES domain first
+sf::sf_use_s2(FALSE)
+eusm <- readRDS("data-raw/aux/eusm.rds") |>
+  rename(geometry = Shape) |>
+  filter(MSFD_BBHT != "") |>
+  st_make_valid() |> st_make_valid()
+eusm <- eusm[st_is_valid(eusm$geometry), ] |>
+  st_crop(st_bbox(ia_sf)) |>
+  st_cast("MULTIPOLYGON")
+
+eusm_h3 <- rast_to_h3(eusm, "MSFD_BBHT", r, zoom)
+
+# Combine into single lookup
+h3_lookup <-
+  ia_h3 |>
+  full_join(gebco_h3, by = "h3") |>
+  full_join(eusm_h3,  by = "h3")
+
+nanoparquet::write_parquet(h3_lookup, "data/aux/h3_lookup.parquet")
+```
+
+The DuckDB join to tag AIS pings — one join, three variables:
+
+```{r}
+#| eval: false
+library(duckdbfs)
+
+trail   <- open_dataset("data/trail")
+h3_look <- open_dataset("data/aux/h3_lookup.parquet")
+
+trail |>
+  mutate(h3 = h3_latlng_to_cell_string(lat, lon, 9L)) |>
+  left_join(h3_look, by = "h3") |>
+  count(ices_area, depth_class, MSFD_BBHT) |>
+  collect()
+```
+
+### Why the same raster template for all three?
+
+An earlier design used `polyfill()` for `ia` and `ICES_GEBCO` (exact polygon
+coverage, no resolution artefact) and rasterize only for `eusm`. This was
+rejected on **consistency** grounds: the same 0.005° resolution and the same
+H3 centroid extraction logic applies uniformly to all three. The theoretical
+precision advantage of polyfill is irrelevant at this scale — AIS positional
+uncertainty is 10–100 m, results are aggregated to 0.5° ICES rectangles, and
+a ~500 m boundary artefact affects a negligible fraction of pings on area
+edges. Furthermore, polyfill proved slow in practice — see Appendix A.3.
+
+### Why not work directly in H3 space?
+
+An H3-first approach would generate all H3 res-9 cells covering the ICES
+domain upfront, extract their centre coordinates, and do point-in-polygon
+lookups against each layer. The problem is scale: the ICES domain bounding
+box at H3 resolution 9 (~0.105 km² per cell) contains on the order of
+hundreds of millions of cells, most of which cover open ocean. Generating
+them, extracting centres, and running point-in-polygon joins against complex
+polygon layers reintroduces the spatial join problem. `terra::rasterize()`
+avoids this because it uses scan-line rasterization — a fundamentally
+different and much faster algorithm than point-in-polygon testing.
+
+---
+
+## Appendix: approaches tried
+
+### A.1 Direct DuckDB spatial join
+
+The natural starting point. Loads the polygon layer as a spatial dataset and
+uses `duckdbfs::spatial_join()` to tag each ping.
+
+```{r}
+#| eval: false
+library(sf)
+library(duckdbfs)
+
+ia_sf <- read_sf("data-raw/aux/ices_areas.fgb")
+tmp   <- tempfile(fileext = ".fgb")
+write_sf(ia_sf, tmp, driver = "FlatGeobuf", quiet = TRUE)
+ia_tbl <- open_dataset(tmp, format = "sf")
+
+trail <- open_dataset("data/trail")
+
+# Does not complete — 1.45M vertices in R-tree, tested against 2.9M pings/year
+trail |>
+  filter(year == 2007) |>
+  mutate(geom = ST_POINT(lon, lat)) |>
+  duckdbfs::spatial_join(ia_tbl, by = "st_intersects", join = "left") |>
+  count(Area_Full) |>
+  collect()
+```
+
+**Result**: does not complete on a single year (2.9M pings). The R-tree must
+evaluate each ping against geometries with thousands of vertices per polygon.
+
+### A.2 `ms_simplify` + direct spatial join
+
+`rmapshaper::ms_simplify()` reduces vertices using the Visvalingam-Whyatt
+algorithm while preserving shared boundaries between adjacent polygons.
+
+```{r}
+#| eval: false
+library(rmapshaper)
+
+ia_ms <- ia_sf |>
+  st_transform(3035) |>
+  ms_simplify(keep = 0.05, keep_shapes = TRUE) |>
+  st_cast("MULTIPOLYGON") |>
+  st_transform(4326)
+
+cat("Vertices before:", nrow(st_coordinates(ia_sf)), "\n")
+cat("Vertices after: ", nrow(st_coordinates(ia_ms)), "\n")
+
+tmp_ms <- tempfile(fileext = ".fgb")
+write_sf(ia_ms, tmp_ms, driver = "FlatGeobuf", quiet = TRUE)
+
+system.time(
+  open_dataset("data/trail") |>
+    filter(year == 2007) |>
+    mutate(geom = ST_POINT(lon, lat)) |>
+    duckdbfs::spatial_join(open_dataset(tmp_ms, format = "sf"),
+                           by = "st_intersects", join = "left") |>
+    count(Area_Full) |>
+    collect()
+)
+```
+
+**Result**: 95% vertex reduction (1.45M → ~73K), join completes in ~9.5
+s/year (~3 min for full dataset). Rejected because `ms_simplify` moves
+coastline boundaries in arbitrary directions including seaward — near-shore
+pings from Icelandic coastal and lumpfish fisheries could be silently dropped.
+For `ICES_GEBCO` (7.59M vertices), `ms_simplify` with `sys = FALSE` raises
+`Error: R character strings are limited to 2^31-1 bytes` — the GeoJSON
+serialisation of the object exceeds the 2 GB R string limit even before
+simplification begins.
+
+### A.3 H3 `polyfill()` per feature
+
+`h3::polyfill()` fills each polygon with all H3 cells whose centres fall
+inside it, building a hash-joinable lookup without any geometry at query time.
+
+```{r}
+#| eval: false
+library(h3)
+
+zoom <- 9L
+
+# Helper: polyfill one sf row, return data frame. NULL if no cells (feature
+# smaller than one H3 cell at this resolution).
+polyfill_feature <- function(sf_row, label_col, label_val, res) {
+  cells <- polyfill(sf_row, res = res)
+  if (length(cells) == 0) return(NULL)
+  data.frame(h3 = cells, label = label_val) |>
+    setNames(c("h3", label_col))
+}
+
+# polyfill() requires an sf object (not a bare sfg geometry), and does not
+# accept MULTIPOLYGON in h3 v3.7.2 — cast to POLYGON first
+ia_poly <- ia_sf |> st_cast("POLYGON")
+
+ia_h3_polyfill <- map(
+  seq_len(nrow(ia_poly)),
+  \(i) polyfill_feature(ia_poly[i, ], "ices_area", ia_poly$Area_Full[i], zoom)
+) |> bind_rows()
+```
+
+**Result**: `polyfill()` at resolution 9 fills each H3 cell (~174 m edge)
+individually. Large ICES areas covering hundreds of thousands of km² contain
+millions of H3 cells. Processing all 66 areas did not complete in reasonable
+time. "Few features" and "fast" are not the same thing when the features are
+large. Rejected.
+
+### A.4 Buffer + simplify → direct spatial join
+
+Buffer each polygon 500 m outward (metric CRS), then simplify to 500 m
+tolerance. Shifting coastal boundaries inland excludes on-land wacky
+coordinates while retaining legitimate near-shore pings; simplification is
+geometrically consistent with the buffer shift; internal area-to-area
+boundaries (straight lines) are unaffected.
+
+```{r}
+#| eval: false
+ia_buf <- ia_sf |>
+  st_transform(3035) |>
+  st_buffer(dist = 500, nQuadSegs = 4) |>
+  st_simplify(dTolerance = 500, preserveTopology = TRUE) |>
+  st_cast("MULTIPOLYGON") |>
+  st_transform(4326)
+
+cat("Vertices before:", nrow(st_coordinates(ia_sf)), "\n")
+cat("Vertices after: ", nrow(st_coordinates(ia_buf)), "\n")
+
+write_sf(ia_buf, "data/aux/ia_buf.fgb", driver = "FlatGeobuf", quiet = TRUE)
+
+system.time(
+  open_dataset("data/trail") |>
+    filter(year == 2007) |>
+    mutate(geom = ST_POINT(lon, lat)) |>
+    duckdbfs::spatial_join(open_dataset("data/aux/ia_buf.fgb", format = "sf"),
+                           by = "st_intersects", join = "left") |>
+    count(Area_Full) |>
+    collect()
+)
+```
+
+**Result**: 96% vertex reduction (1.45M → ~52K), join completes in ~2 s/year
+(~1 min for full dataset). This works, but was superseded by the raster
+approach for two reasons: (1) it requires per-object tuning (buffer distance,
+simplification tolerance), and (2) it cannot be applied to `eusm` (2.18M
+features — `st_simplify` does not preserve shared boundaries between features,
+and `ms_simplify` hits the 2 GB string limit).
+
+### A.5 H3 polygon centroid lookup for `eusm`
+
+Since `eusm` is a complete tessellation (one polygon per ~100 m grid cell),
+compute the H3 cell for each polygon's centroid and build a lookup. Avoids
+any per-ping geometry operations.
+
+```{r}
+#| eval: false
+eusm_centroid_h3 <- eusm |>
+  st_centroid() |>
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2]
+  ) |>
+  st_drop_geometry() |>
+  mutate(h3 = geo_to_h3(data.frame(lat, lon), res = zoom)) |>
+  count(h3, MSFD_BBHT) |>
+  slice_max(n, n = 1, with_ties = FALSE, by = h3) |>
+  select(h3, MSFD_BBHT)
+```
+
+**Result**: Runs, but produces incorrect assignments for large irregular
+polygons (e.g. deep bathyal rock classes covering hundreds of km²) whose
+centroid may fall in a geometrically unrepresentative part of the polygon, or
+even outside it for concave shapes. The raster approach samples the polygon
+uniformly across its entire area, producing a more robust majority vote.
+Rejected.
+
+### A.6 `eusm` direct simplification
+
+`ms_simplify` with `sys = TRUE` (routes through system mapshaper, bypassing
+the 2 GB R string limit):
+
+```{r}
+#| eval: false
+library(rmapshaper)
+
+eusm_simple <- eusm |>
+  st_transform(3035) |>
+  ms_simplify(keep = 0.25, keep_shapes = TRUE,
+              snap_interval = 200,
+              explode = TRUE,
+              sys = TRUE) |>
+  st_transform(4326) |>
+  st_cast("MULTIPOLYGON")
+
+cat("Vertices after simplification:", nrow(st_coordinates(eusm_simple)), "\n")
+```
+
+**Result**: even with `sys = TRUE`, returns `Error: R character strings are
+limited to 2^31-1 bytes`. The 107M-vertex object cannot be serialised to
+GeoJSON for mapshaper even via the system pathway. `st_simplify` is not a
+substitute because it processes each feature independently, breaking shared
+boundaries between adjacent habitat polygons. Rejected.
+
+EOQMD 2>&1

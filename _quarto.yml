@@ -28,11 +28,15 @@ website:
           - text: Historical back-entries
             href: afli-backentry.qmd
       - text: Coordinates
-        href: wacky_recovery.qmd
+        href: wacky-tracks_recovery.qmd
       - text: Landings Match
         href: landings-match.qmd
       - text: Notes
-        href: ramb-list.qmd
+        menu:
+          - text: macOS disk diagnostics
+            href: on_disk.qmd
+          - text: Misc
+            href: ramb-list.qmd
       - icon: github
         href: https://github.com/einarhjorleifsson/logbooks
 

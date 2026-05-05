@@ -2,7 +2,7 @@ library(sf)
 library(arrow)
 library(tidyverse)
 harbours <-
-  read_parquet("../landings/data-raw/data-dump/agf/aflagrunnur_v.parquet") |>
+  read_parquet("data-dump/landings/agf/aflagrunnur_v.parquet") |>
   select(starts_with("hafnar")) |>
   distinct() |>
   rename(hid = hafnarnumer) |>

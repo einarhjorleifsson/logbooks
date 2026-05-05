@@ -139,6 +139,15 @@ be stored in a separate table keyed on `(vid, timestamp)` and joined to `.tid`
 that spans multiple stations — or the entire trip — cannot be assigned to any
 single station without loss of information.
 
+In this project the AIS stream is consolidated from four sources (STK domestic
+network, two commercial feeds, and AIS-corrected GPS logger positions) into
+`data/trail/`, partitioned by year and accessed via `duckdbfs::open_dataset()`.
+The schema is `vid, mmsi, time, lon, lat, speed, heading, cog, provider, pid`,
+where `pid` is a harbour identifier assigned by spatial join — non-`NA` when the
+ping falls inside a port polygon, `NA` at sea. Linking to trips uses a temporal
+between-join on `(vid, T1, T2)`. See `on_ais.qmd` for the full pipeline and
+data volumes.
+
 ### What belongs at station level versus sample level
 
 The station record captures the *envelope* of an entire event: where and when
@@ -403,9 +412,9 @@ gear-level timestamps that are recorded.
 
 #### The AIS location window
 
-Joining vessel-tracking (AIS) positions to a fishing operation requires
-knowing during which interval the vessel's position is informative about
-*where fishing occurred*. This interval differs between gear classes:
+Joining vessel-tracking positions to a fishing operation requires knowing
+during which interval the vessel's position is informative about *where
+fishing occurred*. This interval differs between gear classes:
 
 - **Mobile gear:** The vessel tows the gear throughout `[t2, t3]`, so vessel
   position equals gear position during the entire effort interval. The
@@ -414,7 +423,7 @@ knowing during which interval the vessel's position is informative about
   may be anywhere. The vessel is physically co-located with the gear only
   during retrieval. The location window is therefore `[t3, t4]`.
 
-This asymmetry — the window shifts by one interval between gear classes — 
+This asymmetry — the window shifts by one interval between gear classes —
 creates awkwardness if AIS joins are written separately per gear class. The
 practical fix is to precompute two derived columns, `w1` and `w2`, once in
 `fishing_sample`:
@@ -424,8 +433,17 @@ practical fix is to precompute two derived columns, `w1` and `w2`, once in
 | `w1` (location window start) | `t2` | `t3` |
 | `w2` (location window end) | `t3` | `t4` |
 
-All downstream AIS joins then operate uniformly on `[w1, w2]`, with the
-gear-class logic encapsulated in one place.
+All downstream joins then operate uniformly on `[w1, w2]`, with the
+gear-class logic encapsulated in one place. In this project the vessel
+positions are sourced from `data/trail/` (see `on_ais.qmd`), joined as:
+
+```r
+fishing_sample |>
+  left_join(
+    open_dataset("data/trail/"),
+    by = join_by(vid, between(time, w1, w2))
+  )
+```
 
 #### Effort duration
 
@@ -497,8 +515,8 @@ schema, and their structural difference is instructive:
 
 | Table | Rows | Has `time`? | Grammar level |
 |---|--:|:--:|---|
-| `data/afli/sensor.parquet` | ~3.9 M | No | Station supplement |
-| `data/afli/sensor_GPS.parquet` | ~27 M | Yes | Measurement (time-series) |
+| `data-raw/logbooks/afli/sensor.parquet` | ~3.9 M | No | Station supplement |
+| `data-raw/logbooks/afli/sensor_GPS.parquet` | ~27.7 M | Yes | Measurement (time-series) |
 
 `sensor.parquet` carries one row per station — gear flags, surface/bottom/
 headline temperatures, headline depth — with no timestamp column. It is a
@@ -511,7 +529,16 @@ a position (`lon`/`lat`, corrected from AIS), plus speed, heading, depth, and
 temperature channels. It is a **measurement-level time-series**: one row per
 logger tick, keyed on `(.tid, .sid, vid, time)`. The original wacky coordinates
 are retained as `w_lon`/`w_lat`; `dt_sec` records the interpolation interval
-used in the AIS-based position correction.
+used in the AIS-based position correction. The AIS positions used for the
+correction are drawn from `data/trail/` — the consolidated multi-source track
+dataset described in `on_ais.qmd`.
+
+This table has a dual role: it is simultaneously a measurement-level logbook
+supplement (linked to stations via `.sid`) and one of the four sources merged
+into `data/trail/` under `provider = "wacky"`. In the consolidated AIS trail
+the records appear with corrected coordinates and no station link; in
+`sensor_GPS.parquet` the same records carry `.sid` and `.tid` keys and the
+original wacky coordinates alongside the corrected ones.
 
 This split reflects a real structural difference that the grammar should make
 explicit rather than paper over with a single "sensor" label. A single physical
@@ -631,6 +658,7 @@ schema.
 | `sq`, `ssq` | Station | Statistical square / sub-square (derived from position) |
 | `gid` | (Fishing) Sample | Gear type code |
 | `t1`, `t2`, `t3`, `t4` | (Fishing) Sample | Deployment start / deployment end / retrieval start / retrieval end |
+| `w1`, `w2` | (Fishing) Sample | AIS location window: `[t2, t3]` for mobile gear; `[t3, t4]` for static gear — derived, used for vessel-track joins |
 | `effort_count` | (Fishing) Sample | Count component of effort (hooks, nets, jigs, trap units, or simultaneous gear count for mobile) |
 | `effort_duration` | (Fishing) Sample | Time component of effort (in the natural unit for each gear type; derived from capped `duration_m`) |
 | `effort_unit` | (Fishing) Sample | Unit of the product (e.g. `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"setting"`) |
@@ -857,11 +885,15 @@ event), at finer temporal resolution than the logbook entry. In the `osfd`
 workflow, processed pings carry `.pid` (ping identifier), `vid`, `time`, `lon`,
 `lat`, `speed`, and `heading` — a table that maps directly onto the sample
 level of the hierarchy, with the classified fishing pings serving as implicit
-station boundaries.
+station boundaries. The `data/trail/` dataset described in `on_ais.qmd`
+provides exactly this structure for Icelandic vessels (`vid, mmsi, time, lon,
+lat, speed, heading, cog, provider, pid`), consolidating ~566 million pings
+across 2007–2026 from four sources into a single Hive-partitioned parquet
+store.
 
 ## How data systems map onto the grammar
 
-| | `afli` | `fs_afladagbok` | `adb` | EU eflalo |
+| | `afli` | `fs_afladagbok` | `adb`^†^ | EU eflalo |
 |-|--------|-----------------|-------|-----------|
 | **Trip key** | Derived: `min(.sid)` per `(vid, T2, hid2)` | `ws_veidiferd.id` | `trip_v.trip_id` | Derived: `consecutive_id()` on `FT_DDAT`/`FT_LDAT` |
 | **Station key** | `stofn.visir` | `ws_veidi.id` | `station_v.station_id` | `.eid` (row number — not a true station) |
@@ -870,6 +902,8 @@ station boundaries.
 | **Spatial resolution** | GPS (metres) | GPS (metres) | GPS (variable quality) | ICES rectangle (~50 km) |
 | **Temporal resolution** | Minutes (on-bottom clock) | Minutes (electronic timestamps) | Minutes (electronic timestamps) | Day (`LE_CDAT`); rarely `t2`/`t3` |
 | **Catch format** | Long | Long | Long | Wide (`LE_KG_<SP>` columns) |
+
+^†^ `adb` is the live-streaming feed and is **excluded from the merged output** (`data/logbooks/`): it uses old gear codes and has less reliable coordinates. It is documented here for completeness.
 
 The gear code unification for the Icelandic schemas is handled by
 `gear_mapping` (`data/gear/gear_mapping.parquet`), which maps the legacy many-

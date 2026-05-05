@@ -1,0 +1,498 @@
+---
+title: "Linking Landings to Logbook Trips"
+date: today
+---
+
+## Goal
+
+Attach a landing identifier (`.lid` from `aflagrunnur`) to each logbook trip (`.tid`
+in `data/merged/trip.parquet`), enabling downstream catch-weight reconciliation between
+the two systems. The natural join key is vessel × landing date × port.
+
+## Background {#sec-background}
+
+Understanding the match results requires knowing how the two systems evolved.
+
+**The `afli` era (pre-2021).** Electronic logbooks were introduced during the `afli`
+schema phase, not at the transition to `fs_afladagbok`. The government contracted a
+single company (Trackwell) to handle all e-logbook submissions, and larger vessels
+progressively adopted this system. Smaller vessels — those targeting lumpfish, coastal
+jig fisheries, and similar — remained on **paper** throughout the `afli` era. A single
+government employee was responsible for manually entering paper logbooks and loading
+both paper and electronic records into the legacy database structure (`stofn`, `toga`,
+`lineha`, …). The steady improvement in logbook-landing match rates from 2008 to 2018
+is at least partly attributable to his active curation. His retirement around 2019–2020
+is a plausible explanation for the subsequent decline.
+
+**Spring 2021: market opening.** Until early 2021, Trackwell held an exclusive
+government contract. Opening the market to multiple vendors was abrupt — a structural
+break in data quality, not a gradual phase-in. This "wild west" period is reflected in
+inconsistent harbour codes, incomplete timing records, and other QC issues that
+characterise the `fs_afladagbok` era. Crucially, the overlap period between `afli` and
+`fs_afladagbok` (2021–2022) falls squarely within this window, which is why the merge
+rule **`afli` wins over `fs_afladagbok`** for duplicate trips is a quality decision, not
+a statement about paper vs. electronic recording.
+
+**Harbour coding.** `fs_afladagbok` stores harbour as `hafnarnumer_id` (a sequential
+1–140 index into the `aflagrunnur` lookup), while `afli` stores `hafnarnumer` directly
+(the numeric code in `aflagrunnur`). Both are bridged to a common port identifier (`pid`)
+via `data/ports/ports.gpkg`, eliminating the schema-specific coding difference before
+matching.
+
+## Data {#sec-data}
+
+```{r}
+#| label: setup
+library(arrow)
+library(sf)
+library(duckdbfs)
+library(tidyverse)
+```
+
+```{r}
+#| label: load-harbours
+# Port reference: pid + port name, keyed on hid (= hafnarnumer in aflagrunnur)
+# ports <- read_sf("data/ports/ports.gpkg") |> st_drop_geometry()
+```
+
+```{r}
+#| label: load-land
+# Landing records: one row per (vid × date × pid × port); catch summed.
+# Multiple .lids on the same key are collapsed to min(.lid); n_.lid records how
+# many were merged.
+# here stuff a bit premature - should really do the first step in the 
+#. landings project
+ports <-
+  read_parquet("data/ports/hafnarnumerakerfid.parquet")
+
+land <-
+  read_parquet("data-dump/landings/agf/aflagrunnur.parquet") |>
+  # drop out foreigners, for now
+  filter(skip_numer > 0, !between(skip_numer, 3700, 4999)) |>
+  # align with the last fs_logbook dump
+  filter(londun_hefst <= ymd("2025-12-12")) |>
+  left_join(ports,
+            by = join_by(hafnarnumer == hid)) |>
+  # left_join(ports, by = join_by(hafnarnumer == hid)) |>
+  select(.lid = londun_id, date = londun_hefst, vid = skip_numer,
+         hid = hafnarnumer, port, catch = magn_oslaegt) |>
+  group_by(.lid, vid, date, hid, port) |>
+  summarise(catch = sum(catch, na.rm = TRUE), .groups = "drop") |>
+  filter(catch > 0) |>
+  group_by(vid, date, hid, port) |>
+  summarise(.lid = min(.lid), catch = sum(catch), n_.lid = n(), .groups = "drop") |>
+  mutate(date = as.Date(date))
+```
+
+`n_.lid > 1` flags keys where multiple landing records were collapsed into one. Those
+represent either split deliveries or gear-disaggregated entries in the source database.
+
+```{r}
+#| label: tbl-n-lid
+#| tbl-cap: "Proportion of landing keys with multiple source records."
+land |>
+  count(n_.lid) |>
+  mutate(pct = round(100 * n / sum(n), 1))
+```
+
+```{r}
+#| label: load-trip
+# Trips with total logbook catch; harbour translated to hid/port for both schemas.
+trip <-
+  read_parquet("data/logbooks/trip.parquet") |>
+  mutate(date = as_date(T2)) |>
+  filter(date >= ymd("2007-09-01"), date <= ymd("2025-12-12")) |>
+  filter(vid > 0, !between(vid, 3700, 4999)) |>
+  left_join(
+    read_parquet("data/logbooks/catch.parquet") |>
+      left_join(
+        read_parquet("data/logbooks/station.parquet") |> select(.sid, .tid, schema),
+      ) |>
+      filter(!is.na(.tid)) |>
+      group_by(.tid) |>
+      summarise(catch = sum(as.numeric(catch), na.rm = TRUE), .groups = "drop"),
+    by = ".tid"
+  ) |>
+  filter(catch > 0) |>
+  select(.tid, vid, date, hid = hid2, port, catch, schema)
+```
+
+## Matching {#sec-matching}
+
+### Strategy {#sec-strategy}
+
+The join key is `vid × date × port (hid)`. Known sources of mismatch:
+
+- **Date lag** — `londun_hefst` in the landing register may lag the logbook's `T2` by a
+  day or two due to processing or recording delays.
+- **Port discrepancy** — planned vs. actual landing port sometimes differ.
+
+A three-step cascade, accepting only unambiguous matches (exactly one `.lid` per `.tid`)
+at each step:
+
+| Step | Keys | Notes |
+|---|---|---|
+| 1 | `vid + date + hid + port` | exact; unambiguous |
+| 2 | `vid + date` | port dropped; unambiguous |
+| 3 | `vid + date ± 1 day + hid + port` | date relaxed by one day; unambiguous |
+
+### Cascade function {#sec-cascade-fn}
+
+```{r}
+#| label: cascade-fn
+# One cascade step: inner-join, keep only unambiguous matches (1 .lid per .tid).
+try_match <- function(unmatched, land_tbl, by, type) {
+  unmatched |>
+    inner_join(land_tbl, by = by) |>
+    group_by(.tid) |>
+    filter(n_distinct(.lid) == 1) |>
+    slice(1) |>
+    ungroup() |>
+    mutate(match_type = type)
+}
+```
+
+### Cascade {#sec-cascade}
+
+```{r}
+#| label: cascade
+m1 <- try_match(
+  trip, 
+  land, 
+  c("vid", "date", "hid", "port"), 
+  "01 exact"
+)
+
+
+# ±1 day: expand land by shifting dates one day in each direction
+land_pm1 <- bind_rows(
+  land |> mutate(date = date - 1),
+  land |> mutate(date = date + 1)
+)
+
+m2 <- try_match(
+  trip |> filter(!.tid %in% m1$.tid),
+  land_pm1 |> filter(!.lid %in% m1$.lid),
+  c("vid", "date", "hid", "port"), 
+  "02 exact ±1 day"
+)
+
+m3 <- try_match(
+  trip |> filter(!.tid %in% c(m1$.tid, m2$.tid)),
+  land |> filter(!.lid %in% c(m1$.lid, m2$.lid)),
+  c("vid", "date"), 
+  "03 vid_date"
+)
+
+
+
+lid_map <- bind_rows(m1, m2, m3) |>
+  select(.tid, .lid, match_type)
+```
+
+```{r}
+#| label: tbl-cascade
+#| tbl-cap: "Match counts by step and schema."
+trip |>
+  left_join(lid_map, by = ".tid") |>
+  mutate(match_type = replace_na(match_type, "04 unmatched")) |>
+  count(schema, match_type) |>
+  group_by(schema) |>
+  mutate(pct = round(100 * n / sum(n), 1)) |>
+  arrange(schema, match_type)
+```
+
+```{r}
+#| label: trip-with-lid
+# Attach .lid and match_type to the trip table
+trip <- trip |> left_join(lid_map, by = ".tid")
+```
+
+## Annual coverage {#sec-annual}
+
+Both the logbook system and the landing register are intended to function as **complete
+censuses**: every fishing trip should produce a logbook entry, and every delivery should
+appear in the landing register. The figures below show how far from that ideal we are and
+where the gaps lie.
+
+```{r}
+#| label: annual-setup
+logbook_yr <- trip |>
+  mutate(year = year(date),
+         match_type = replace_na(match_type, "04 unmatched")) |>
+  filter(year >= 2008, year <= 2025) |>
+  group_by(year, match_type) |>
+  summarise(n = n(), catch_kt = sum(catch, na.rm = TRUE) / 1e6, .groups = "drop")
+
+land_yr <- land |>
+  left_join(lid_map |> select(.lid, match_type), by = ".lid") |>
+  mutate(year = year(date),
+         match_type = replace_na(match_type, "04 unmatched")) |>
+  filter(year >= 2008, year <= 2025) |>
+  group_by(year, match_type) |>
+  summarise(n = n(), land_kt = sum(catch, na.rm = TRUE) / 1e6, .groups = "drop")
+```
+
+```{r}
+#| label: fig-annual-trips
+#| fig-cap: "Annual trip counts in the logbook (lower) and landing records (upper), 2008–2025. Blue tones: matched; orange: matched on vessel + date only; red: unmatched."
+bind_rows(
+  logbook_yr |> select(year, match_type, n) |> mutate(source = "Logbook trips"),
+  land_yr    |> select(year, match_type, n) |> mutate(source = "Landing records")
+) |>
+  ggplot(aes(year, n / 1e3, fill = match_type)) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  facet_wrap(~source, ncol = 1) +
+  labs(x = NULL, y = "Thousands of records") +
+  scale_fill_brewer(palette = "Set1")
+```
+
+```{r}
+#| label: fig-annual-weight
+#| fig-cap: "Annual catch weight in the logbook (lower) and landing weight (upper), 2008–2025."
+bind_rows(
+  logbook_yr |> select(year, match_type, kt = catch_kt) |> mutate(source = "Logbook catch"),
+  land_yr    |> select(year, match_type, kt = land_kt)  |> mutate(source = "Landing weight")
+) |>
+  ggplot(aes(year, kt, fill = match_type)) +
+  geom_col(position = position_stack(reverse = TRUE)) +
+  facet_wrap(~source, ncol = 1) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = NULL, y = "kt (thousand tonnes)")
+```
+
+### What the figures show
+
+**Trip counts (@fig-annual-trips).** In the `afli` era (2008–2020), logbook and landing
+totals are broadly similar in scale — on the order of 40–65k records per year on each
+side — but a non-trivial fraction on each side fails to find a counterpart. On the
+**landing side**, roughly 15–20% of records per year have no matching logbook trip. On the
+**logbook side**, roughly 5% of trips have no matching landing. For a system that is
+supposed to be a complete census on both sides, these gaps are surprisingly persistent.
+
+The unmatched landings belong disproportionately to fisheries that have historically
+operated outside the routine logbook system: lumpfish (Grásleppunet / Rauðmaganet),
+coastal pole-and-line (sjóstöng), and a small number of seaweed deliveries (which have
+no logbook requirement). These are small-vessel fisheries that remained on paper logbooks
+throughout the `afli` era, relying on manual digitisation by a single government employee
+whose retirement around 2019–2020 coincides with a visible increase in unmatched landings.
+
+From 2021 onward the picture shifts: logbook records decline as `afli` winds down, and
+the proportion of unmatched logbook trips grows — consistent with the data-quality
+deterioration of the "wild west" period following the market opening.
+
+**Catch weight (@fig-annual-weight).** Landing weight is systematically higher than
+logbook catch in most years. Part of this gap is structural: landing records exist for
+fisheries (lumpfish, seaweed, shellfish) that are either absent from or severely
+under-represented in the logbooks. In pelagic fisheries, catch transfers between vessels
+at sea mean that a catching vessel's logbook records the full haul while the weight
+appears under the receiving vessel's landing — not a data quality issue, but a structural
+feature.
+
+## Trip-level weight comparison {#sec-weight}
+
+For matched trips, `catch` in the logbook and `catch` in `land` are both in kg,
+enabling a direct comparison.
+
+```{r}
+#| label: tbl-weight-ratio
+#| tbl-cap: "Ratio of logbook catch to landing weight for matched trips, by schema and match type. Trips with catch > 0 on both sides."
+trip |>
+  filter(!is.na(.lid)) |>
+  inner_join(land |> select(.lid, land_catch = catch), by = ".lid") |>
+  filter(catch > 0, land_catch > 0) |>
+  mutate(ratio = catch / land_catch) |>
+  group_by(schema, match_type) |>
+  summarise(
+    n      = n(),
+    p25    = round(quantile(ratio, 0.25), 3),
+    median = round(median(ratio), 3),
+    p75    = round(quantile(ratio, 0.75), 3),
+    mean   = round(mean(ratio), 3),
+    .groups = "drop"
+  )
+```
+
+The median ratio close to 1.0 confirms that logbook `catch` and landing `catch` are in
+the same units (kg) throughout and that the overall agreement for matched trips is
+genuine. Elevated **mean** values relative to the median reflect a right tail driven by
+pelagic trips where catch is transferred to a receiving vessel: the catching vessel's
+logbook records the full haul but no corresponding landing appears under its own
+identifier.
+
+## Coverage: the view from landings {#sec-reverse}
+
+The forward analysis asks which trips lack a landing. Reversing the question — which
+landings lack a logbook trip? — is more informative for identifying systematic gaps.
+This section focuses on 2008–2020, when `afli` is the primary schema.
+
+```{r}
+#| label: reverse-setup
+land_afli <- land |>
+  #filter(date >= ymd("2008-01-01"), date <= ymd("2020-12-31")) |>
+  mutate(year = year(date), matched = .lid %in% lid_map$.lid)
+
+cat("Landings 2008-2020:", nrow(land_afli), "\n")
+cat("Matched to logbook:", sum(land_afli$matched),
+    sprintf("(%.1f%%)\n", 100 * mean(land_afli$matched)))
+```
+
+### By year
+
+```{r}
+#| label: fig-coverage-year
+#| fig-cap: "Fraction of landings matched to a logbook trip, by year. Dashed lines mark the curator retirement (~2019–2020) and market opening (spring 2021)."
+land_afli |>
+  count(year, matched) |>
+  group_by(year) |>
+  mutate(pct = 100 * n / sum(n)) |>
+  filter(matched) |>
+  ggplot(aes(year, pct)) +
+  geom_col() +
+  geom_vline(xintercept = c(2019.5, 2021), linetype = "dashed", colour = "grey50") +
+  labs(x = NULL, y = "Landings matched (%)")
+```
+
+Coverage improved from ~73% in 2009–2010 to ~87% by 2017–2018, then fell to ~72% in
+2020. The arc is more plausibly explained by institutional factors — the curator and the
+market opening — than by any change in fishing behaviour or vessel compliance.
+
+### By vessel
+
+```{r}
+#| label: tbl-vessel-coverage
+#| tbl-cap: "Landing frequency and logbook coverage by vessel coverage group (vessels with ≥10 landings, 2008–2020)."
+by_vessel <- land_afli |>
+  group_by(vid) |>
+  summarise(
+    n_landings  = n(),
+    n_matched   = sum(matched),
+    pct_matched = round(100 * n_matched / n_landings, 1),
+    .groups = "drop"
+  ) |>
+  filter(n_landings >= 10)
+
+low_cov_vids  <- by_vessel |> filter(pct_matched <  50) |> pull(vid)
+high_cov_vids <- by_vessel |> filter(pct_matched >= 90) |> pull(vid)
+
+by_vessel |>
+  mutate(coverage_group = case_when(
+    pct_matched <  50 ~ "< 50%",
+    pct_matched <  90 ~ "50–90%",
+    TRUE              ~ "≥ 90%"
+  )) |>
+  group_by(coverage_group) |>
+  summarise(
+    n_vessels        = n(),
+    median_landings  = median(n_landings),
+    total_landings   = sum(n_landings),
+    pct_of_unmatched = round(
+      100 * sum(n_landings - n_matched) / sum(land_afli$matched == FALSE), 1
+    ),
+    .groups = "drop"
+  )
+```
+
+The distribution is strongly bimodal. Low-coverage vessels (<50%) have a median of
+roughly 4–5× fewer landings than well-covered vessels. This reflects the **paper vs.
+electronic split**: larger, more active vessels adopted Trackwell e-logbooks early and
+are consistently represented in `afli`; smaller vessels (lumpfish, coastal jig, sjóstöng)
+remained on paper, relying on manual digitisation that declined with the curator's
+retirement.
+
+### By harbour
+
+```{r}
+#| label: tbl-harbour-coverage
+#| tbl-cap: "Harbours with lowest logbook coverage (≥50 landings, 2008–2020)."
+land_afli |>
+  group_by(port) |>
+  summarise(
+    n_landings      = n(),
+    pct_matched     = round(100 * mean(matched), 1),
+    pct_low_cov_vid = round(100 * mean(vid %in% low_cov_vids), 1),
+    .groups = "drop"
+  ) |>
+  filter(n_landings >= 50) |>
+  arrange(pct_matched) |>
+  slice_head(n = 12)
+```
+
+Most low-coverage harbours are explained by low-compliance vessels clustering there.
+Harbours near zero coverage that are not explained by low-coverage vessels likely reflect
+fisheries with no logbook requirement (seaweed, shellfish).
+
+### By gear type
+
+```{r}
+#| label: tbl-gear-coverage
+#| tbl-cap: "Logbook coverage by gear type (landings side, 2008–2020, ≥100 landings)."
+d <- read_parquet("data-dump/landings/agf/aflagrunnur.parquet") |> 
+  select(.lid = londun_id, date = londun_hefst,
+         gid_land = veidarfaeri) |>
+  distinct() |>
+  #filter(date >= ymd("2008-01-01"), date <= ymd("2020-12-31")) |>
+  right_join(land_afli |> select(.lid, matched), by = ".lid")
+
+d |>
+  group_by(gid_land) |>
+  summarise(n = n(), pct_matched = round(100 * mean(matched), 1), .groups = "drop") |>
+  filter(n >= 100) |>
+  arrange(-pct_matched) |>
+  select(gid_land, n, pct_matched) |> 
+  knitr::kable()
+d |> 
+  mutate(year = year(date)) |> 
+  count(year, gid_land, matched) |>
+  ggplot(aes(year, n, fill= matched)) +
+  geom_col() +
+  facet_wrap(~ gid_land, scales = "free_y")
+```
+
+Two gear types are nearly absent from logbooks:
+
+- **Sjóstöng** (`gid=19`, sea-rod): <1% coverage across ~20k landings — coastal
+  pole-and-line, likely exempt from logbook requirements.
+- **Grásleppunet / Rauðmaganet** (`gid=3/4`, lumpfish gillnets): 26% and 50% across
+  ~60k combined landings. Both target lumpfish and are the largest single contributor to
+  unmatched landings in absolute terms.
+
+::: {.callout-warning}
+### Lumpfish logbook records are unreliable
+
+Grásleppunet (`gid=3`) and Rauðmaganet (`gid=4`) together represent ~60k landings
+2008–2020 but match at only 26% and 50% respectively. The logbook records that do exist
+for lumpfish are known to be problematic in other respects (seasonal timing, gear
+reporting). **Do not use lumpfish logbook data in catch reconciliation without dedicated
+QA.** Flagged as outstanding work.
+:::
+
+## Outstanding issues {#sec-outstanding}
+
+::: {.callout-note}
+### Collapsed landing records (`n_.lid > 1`)
+
+Where multiple `.lid` values share the same `vid × date × hid × port` key, the smallest
+`.lid` is retained and totals are summed. This occurs when a single delivery is recorded
+as multiple rows (e.g., split by gear type) in `aflagrunnur`. Currently ~X% of keys are
+affected; the collapsed record should be validated before downstream weight reconciliation.
+:::
+
+::: {.callout-warning}
+### Duplicate trips in `fs_afladagbok`
+
+Some `vid × date × port` combinations map to more than one `.tid` in the logbook — an
+upstream completeness issue in `scripts/01_fs_afladagbok_convert.R`. Affects ~7,200
+records. These receive the same `.lid` here; the root cause should be fixed in the
+convert script.
+:::
+
+::: {.callout-note}
+### Permanently unmatched trips (~2%)
+
+Trips remaining after all three cascade steps have no landing record within ±1 day at
+the same port and no unambiguous vessel+date match. These are genuine gaps — either
+unreported landings, transfers to other vessels (pelagic), or logbook entries for catch
+that was discarded or used as bait.
+:::
+

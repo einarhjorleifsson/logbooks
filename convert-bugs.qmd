@@ -56,8 +56,8 @@ completely unpopulated for gid 6 trips in 2020–2021:
 library(nanoparquet)
 library(tidyverse)
 
-station_v <- read_parquet("data-raw/data-dump/adb/station_v.parquet")
-trawl     <- read_parquet("data-raw/data-dump/adb/trawl_and_seine_net_v.parquet")
+station_v <- read_parquet("data-dump/logbooks/adb/station_v.parquet")
+trawl     <- read_parquet("data-dump/logbooks/adb/trawl_and_seine_net_v.parquet")
 
 station_v |>
   filter(gear_no == 6) |>
@@ -152,7 +152,7 @@ gid 5, 6, 7, 51, and 53 stations that are absent from `trawl_and_seine_net_v`
 ```{r}
 #| label: tbl-dredge
 #| tbl-cap: "dredge_v gear code coverage"
-dredge <- read_parquet("data-raw/data-dump/adb/dredge_v.parquet")
+dredge <- read_parquet("data-dump/logbooks/adb/dredge_v.parquet")
 station_v |>
   filter(station_id %in% dredge$station_id) |>
   count(gear_no) |>
@@ -191,9 +191,9 @@ library(nanoparquet)
 library(tidyverse)
 
 bind_rows(
-  read_parquet("data/adb/station_new-brute-force.parquet") |>
+  read_parquet("data-raw/logbooks/adb/station_new-brute-force.parquet") |>
     mutate(year = year(date), source = "brute-force"),
-  read_parquet("data/adb/station.parquet") |>
+  read_parquet("data-raw/logbooks/adb/station.parquet") |>
     mutate(year = year(date), source = "fixed")
 ) |>
   count(year, source) |>
@@ -208,7 +208,7 @@ bind_rows(
 ```{r}
 #| label: tbl-fs-years
 #| tbl-cap: "fs_afladagbok station counts by year after fix"
-read_parquet("data/fs_afladagbok/station.parquet") |>
+read_parquet("data-raw/logbooks/fs_afladagbok/station.parquet") |>
   mutate(year = year(date)) |>
   count(year) |>
   filter(between(year, 2016, 2026)) |>

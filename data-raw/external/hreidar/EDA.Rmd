@@ -1,0 +1,108 @@
+---
+title: "Vessel registry - EDA"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+v <- 
+  readxl::read_excel("data-raw/HREIDAR_Islensk_skip.xlsx", guess_max = 2e5) |> 
+  janitor::clean_names() |> 
+  select(year = ar,
+         vid = nr,
+         vessel = nafn,
+         uid = stadur,
+         uno = numer,
+         year_construction = ar_smidad,
+         brv_old = brl_gomul,
+         brv_new = brl_ny,
+         brt = bruttotonn_maeld,
+         kw0 = kw_maelt,
+         hp = hp_maelt,
+         length = lengd_skrad,
+         loa = mesta_lengd,
+         harbour = heimahofn,
+         fate = endalok,
+         everything())
+```
+
+## Data pattern
+
+* Looks like for lower vessels numbers we have not the full "annual" history back in time
+* For some vessels with higher numbers than ~1000 there is a general tendency that first year of entry is a function of veesel number
+  * I guess this is because when a new vessel comes in it get the next available number
+  * There are however some exceptions. There may be legitimate reason for this or it could indicate data entry error.
+
+```{r, fig.height = 15, fig.width = 9}
+v |> 
+  filter(between(vid, 1, 3700)) |> 
+  filter(between(year, 1900, 2050)) |> 
+  ggplot() +
+  theme_grey(base_size = 14) +
+  geom_tile(aes(year, vid)) +
+  labs(x = NULL, y = "Vessel id") +
+  scale_x_continuous(breaks = seq(1900, 2050, by = 20)) +
+  scale_y_continuous(breaks = seq(0, 10000, by = 100))
+```
+
+Let's calculate the number of vessels by uid (staður):
+
+```{r}
+v |> 
+  filter(between(vid, 1000, 3700),
+         between(year, 1963, 2025)) |> 
+  count(year, uid) |> 
+  ggplot(aes(year, n)) +
+  geom_point() +
+  facet_wrap(~ uid,
+             scales = "free_y")
+```
+
+## Vessel history
+
+* For now just looking at change in name and uid
+* Could easily be expanded to include more variables (loa, brt, ...)
+
+```{r}
+# Get unique history
+h <- 
+  v |> 
+  filter(between(vid, 1, 9995)) |> 
+  filter(between(year, 1900, 2050)) |>
+  select(year:fate) |> 
+  rename(brv = brv_new,
+         kw = kw0) |> 
+  glimpse()
+  arrange(vid, year) |> 
+  group_by(vid) |> 
+  mutate(.rid = 1:n(),
+         .last = case_when(.rid == max(.rid) ~ TRUE,
+                           .default = FALSE),
+         v = dplyr::consecutive_id(vessel, uid, uno, .last),
+         .before = vid) |> 
+  # put vessel fate on last record
+  fill(fate) |> 
+  mutate(fate = case_when(.rid == max(.rid) ~ fate,
+                          .default = NA)) |> 
+  ungroup() |> 
+  distinct(vid, vessel, uid, uno, .last, .keep_all = TRUE) |> 
+  select(-.last)
+h
+```
+
+List of vessels with no recorded fate:
+
+```{r}
+h |> 
+  group_by(vid) |> 
+  filter(.rid == max(.rid),
+         is.na(fate))
+```
+
+... not bad
+

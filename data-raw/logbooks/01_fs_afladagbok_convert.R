@@ -131,7 +131,7 @@ source <-
     date   = as_date(coalesce(t1, t3, t4)),
     schema = SCHEMA
   ) |>
-  select(-c(x1, y1, x2, y2, nx1, nx2, ny1, ny2, coord_fmt, source)) |>
+  select(.sid, .tid, date, gid, t1, t3, t4, z1, z2, lon1, lat1, lon2, lat2, n_lost, schema) |>
   arrange(date, .sid, t1, t3, t4)
 
 # Helper: station keys + ICES gear labels for inner-joining aux tables

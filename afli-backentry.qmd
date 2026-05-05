@@ -29,7 +29,7 @@ library(nanoparquet)
 dictionary <- read_parquet("data/dictionary.parquet") |> filter(schema == "afli")
 
 source <-
-  read_parquet("data-raw/data-dump/afli/stofn.parquet") |>
+  read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
   wk_translate(dictionary)
 
 # Remove monthly aggregate records (see afli-tables.qmd)
@@ -158,7 +158,7 @@ pre80 <- non_agg |>
   ) |>
   mutate(block_id = cumsum(new_block))
 
-catch_raw <- read_parquet("data-raw/data-dump/afli/afli.parquet")
+catch_raw <- read_parquet("data-dump/logbooks/afli/afli.parquet")
 
 pre80 |>
   group_by(block_id) |>

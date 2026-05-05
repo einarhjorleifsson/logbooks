@@ -1,0 +1,246 @@
+---
+title: "macOS Disk Space — Diagnostics and Recovery"
+date: 2026-04-27
+---
+
+Notes from a session where the ASTD ZIP → Parquet pipeline failed mid-run due to
+a full disk. Covers how to find what is consuming space, why `du` and `df` often
+disagree on macOS, and quick wins for recovering space.
+
+---
+
+## Checking free space
+
+`df -h` reports usage at the filesystem/volume level.
+The `-h` flag gives human-readable sizes (GB/TB).
+
+```{bash}
+#| eval: false
+df -h /Users/einarhj   # or just df -h to see all volumes
+```
+
+Key columns: **Size**, **Used**, **Avail**, **Capacity**.
+On a full disk you will see `Capacity: 100%` with only a few hundred MB **Avail**.
+
+::: {.callout-warning}
+Even a few hundred MB free is functionally full on macOS.
+APFS reserves space for metadata and large writes will fail before
+`Avail` reaches zero.
+:::
+
+---
+
+## Finding large directories
+
+### Top-level scan
+
+`du -sh` gives a summary size for each argument; `sort -rh` sorts by
+human-readable size descending.
+
+```{bash}
+#| eval: false
+# One level deep under a directory
+du -sh ~/stasi/*/  2>/dev/null | sort -rh | head -20
+```
+
+### Recursive drill-down
+
+`--max-depth=N` limits recursion.  Start shallow and drill into the
+largest directories.
+
+```{bash}
+#| eval: false
+# Home directory, 6 levels deep — catches most project trees
+du -h ~ --max-depth=6 2>/dev/null | sort -rh | head -30
+```
+
+### Stay on one filesystem
+
+The `-x` flag (single-device) stops `du` from crossing mount points
+(e.g., into `/Volumes/...`), avoiding inflated numbers.
+
+```{bash}
+#| eval: false
+du -shx /Users/ /Applications/ /Library/ /opt/ /private/ 2>/dev/null \
+  | sort -rh
+```
+
+---
+
+## Why `du` and `df` disagree on macOS
+
+On this machine the Data volume showed **969.9 GB** used (via `diskutil`),
+but all `du` scans together only accounted for **~283 GB**.
+The ~687 GB gap is explained by:
+
+| Source | Explanation |
+|---|---|
+| **iCloud Drive local cache** | Files synced to iCloud but also cached locally; count toward APFS usage but many paths are SIP-protected (`Operation not permitted`). |
+| **Photos library** | Similarly protected; can be hundreds of GB if Photos is set to keep originals. |
+| **Sandboxed app containers** | `~/Library/Containers/`, `~/Library/Group Containers/` — macOS SIP prevents `du` from reading most of these. |
+| **Purgeable space** | APFS marks some cached/iCloud-backed content as "purgeable"; it shows as used in `df` but can be reclaimed by the OS on demand. |
+| **Trash** | Files deleted in Finder but not emptied; `~/.Trash` is also protected from terminal `du`. |
+
+::: {.callout-note}
+The only tool that sees the true breakdown — including purgeable content —
+is **System Settings → General → Storage**.
+Use it to identify and offload iCloud content, empty Trash, and review
+large app data before going further.
+:::
+
+### Inspecting the APFS container directly
+
+```{bash}
+#| eval: false
+# Shows actual bytes consumed per APFS volume (more honest than df)
+diskutil apfs list disk3
+```
+
+Look for the **Capacity Consumed** line on each volume.
+
+---
+
+## NTFS volumes are read-only on macOS
+
+External drives formatted as **NTFS** are mounted read-only by default on macOS.
+No third-party driver = no writes.
+
+```{bash}
+#| eval: false
+# Check the filesystem type and protocol of a mounted volume
+diskutil info /Volumes/myDrive | grep -E "Protocol|Type|Solid State"
+```
+
+**Options:**
+
+- **exFAT** — reformatting as exFAT gives native read/write on both macOS and
+  Windows with no drivers needed. Best choice for data archive drives that don't
+  need NTFS-specific features.
+- **Paragon NTFS / Tuxera NTFS** — paid kernel extensions; seamless but adds
+  a dependency.
+- macOS experimental NTFS write (fstab trick) — unreliable; not recommended
+  for large files.
+
+---
+
+## Quick wins for recovering space
+
+### Homebrew download cache
+
+```{bash}
+#| eval: false
+# Removes cached downloads and old formula versions
+brew cleanup
+# Preview first (dry run):
+brew cleanup -n
+```
+
+Typically frees 2–5 GB.
+
+### Empty Trash from Finder
+
+`Cmd+Shift+Delete` → Empty Trash, or right-click Trash icon → Empty.
+Terminal cannot access `~/.Trash` without Full Disk Access.
+
+### Offload iCloud Drive
+
+In **System Settings → Apple ID → iCloud → iCloud Drive → Optimise Mac Storage**,
+enable "Optimise Mac Storage" to keep only recent files locally.
+
+### Move raw data archives to external drive
+
+Once a conversion pipeline has run to completion, raw input files
+(ZIP archives, Oracle dumps, etc.) can be moved to an external drive.
+Update path variables in your scripts to point to the new location.
+
+---
+
+## Pipeline failure: "No space left on device"
+
+The ASTD ZIP → Parquet script (`data-raw/ais/astd_zip-to-parquet.R`) failed
+when the disk filled mid-run.  Two bugs were also found and fixed.
+
+### Root cause
+
+DuckDB's `COPY ... TO` writes an output parquet; if the disk fills
+during the write, the file is left **partially written** but present on disk.
+On the next run the script's "already exists" check sees the partial file
+and silently skips it — so the corrupt file persists indefinitely.
+
+Additionally, each ZIP is first extracted to a temp directory under `/tmp`
+via `unzip(zip, exdir = tmp)`.  When `/tmp` is on the same volume as the
+output (it is on macOS), a full disk causes `dir.create(tmp)` to fail
+silently, `unzip` then errors ("exdir does not exist"), and the loop hits
+`next` **without recording the failure in `results`**.
+The summary log therefore reported "Failed: 2" while silently dropping
+141 months.
+
+### Fix 1: detect temp-dir creation failure
+
+```{r}
+#| eval: false
+tmp    <- tempfile(pattern = "astd_")
+dir_ok <- dir.create(tmp)
+
+if (!dir_ok || !dir.exists(tmp)) {
+  warning("Cannot create temp dir for ", basename(zip),
+          " — likely no disk space. Stopping pipeline.")
+  results[[i]] <- data.frame(yyyymm = ym, ok = FALSE, seconds = 0)
+  break   # stop the loop rather than silently skipping all remaining months
+}
+```
+
+Key changes:
+
+- Capture the return value of `dir.create()` (it returns `FALSE` on failure, not an error).
+- Record the failure in `results[[i]]` so it appears in the summary.
+- Use `break` instead of `next` — a failed temp dir almost certainly means
+  no disk space, so there is no point continuing to the next file.
+
+### Fix 2: delete partial output on DuckDB failure
+
+```{r}
+#| eval: false
+ok <- tryCatch({
+  dbExecute(con, sql)
+  TRUE
+}, error = function(e) {
+  warning("FAILED on ", basename(zip), ": ", conditionMessage(e))
+  # Remove any partial parquet left behind by the failed write.
+  # Without this, the "already exists" guard would skip it on re-run.
+  if (file.exists(out_file)) unlink(out_file)
+  FALSE
+})
+```
+
+### Recovery procedure after a disk-full run
+
+```{bash}
+#| eval: false
+# 1. Check which parquets exist and their sizes.
+#    A suspiciously small file compared to neighbours is likely corrupt.
+ls -lh data-raw/ais/astd/year=2014/month=01/
+
+# 2. Delete any partial output manually (if the fixed script wasn't the one
+#    that wrote it, it won't have been auto-deleted).
+rm data-raw/ais/astd/year=2014/month=01/astd_201401.parquet
+
+# 3. Free up space (move/delete source ZIPs, run brew cleanup, empty Trash).
+
+# 4. Re-run the script — the "already exists" guard means only missing
+#    months will be processed.
+```
+
+### Verifying the output after a re-run
+
+```{r}
+#| eval: false
+library(duckdbfs)
+
+# Row counts by year/month — gaps indicate missing or failed months
+open_dataset("data-raw/ais/astd") |>
+  count(year, month) |>
+  arrange(year, month) |>
+  collect() |>
+  print(n = Inf)
+```
