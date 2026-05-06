@@ -32,7 +32,7 @@ fs_fs      <- read_parquet("data-raw/logbooks/fs_afladagbok/fishing_sample.parqu
 
 merged_trip    <- read_parquet("data/logbooks/trip.parquet")
 merged_station <- read_parquet("data/logbooks/station.parquet")
-merged_fs      <- arrow::read_parquet("data/logbooks/fishing_sample.parquet")
+merged_fs      <- read_parquet("data/logbooks/fishing_sample.parquet")
 merged_catch   <- read_parquet("data/logbooks/catch.parquet")
 ```
 

@@ -1,4 +1,4 @@
-library(arrow)
+library(nanoparquet)
 library(tidyverse)
 ports <- read_parquet("data/ports/hafnarnumerakerfid.parquet")
 aflagrunnur <-

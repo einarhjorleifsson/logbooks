@@ -55,9 +55,9 @@ list(
   tar_target(script_afli,  "data-raw/logbooks/01_afli_convert.R",          format = "file"),
   tar_target(script_fs,    "data-raw/logbooks/01_fs_afladagbok_convert.R", format = "file"),
   tar_target(script_adb,            "data-raw/logbooks/01_adb_convert.R",          format = "file"),
-  tar_target(script_merge,          "data/logbooks/logbooks.R",                             format = "file"),
-  tar_target(script_landings,       "data/landings/landings.R",                             format = "file"),
-  #tar_target(script_landings_match, "data/logbooks-landings_match.R",              format = "file"),
+  tar_target(script_merge,          "data/logbooks/logbooks_merge.R",           format = "file"),
+  tar_target(script_landings,       "data/landings/landings.R",                 format = "file"),
+  tar_target(script_landings_match, "data/logbooks/logbooks_landings-match.R",  format = "file"),
 
 
   # ── Stage 0b: Lookup tables ──────────────────────────────────────────────────
@@ -152,9 +152,10 @@ list(
       adb_files
       gear_mapping_file
       script_merge
-      source("data/logbooks/logbooks.R")
+      source("data/logbooks/logbooks_merge.R")
       c("data/logbooks/trip.parquet",
         "data/logbooks/station.parquet",
+        "data/logbooks/fishing_sample.parquet",
         "data/logbooks/catch.parquet")
     },
     format = "file"
@@ -172,22 +173,25 @@ list(
         "data/landings/catch.parquet")
     },
     format = "file"
-  )
+  ),
 
 
   # ── Stage 4: Landings match ──────────────────────────────────────────────────
-  # Builds a .tid → .lid crosswalk between merged logbook trips and the landing
-  # register.  Depends on merged_files (trip/station/catch) being up to date.
+  # Builds a .tid → .tid_land crosswalk between merged logbook trips and the
+  # landing register. Depends on merged_files and landings_files being up to date.
+  # Also writes .tid_land and match_type back into trip.parquet.
 
-  # tar_target(
-  #   name    = landings_match_file,
-  #   command = {
-  #     merged_files                                 # trip/station/catch must exist
-  #     script_landings_match
-  #     source("data/logbooks-landings_match.R")
-  #     "data/logbooks/lid_map.parquet"
-  #   },
-  #   format = "file"
-  # )
+  tar_target(
+    name    = landings_match_file,
+    command = {
+      merged_files                                 # trip/station/fishing_sample/catch must exist
+      landings_files                               # landings/catch must exist
+      script_landings_match
+      source("data/logbooks/logbooks_landings-match.R")
+      c("data/logbooks/lid_map.parquet",
+        "data/logbooks/trip.parquet")
+    },
+    format = "file"
+  )
 
 )

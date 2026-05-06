@@ -1,5 +1,5 @@
 library(sf)
-library(arrow)
+library(nanoparquet)
 library(tidyverse)
 harbours <-
   read_parquet("data-dump/landings/agf/aflagrunnur_v.parquet") |>

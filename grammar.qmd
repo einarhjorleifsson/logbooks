@@ -305,7 +305,7 @@ or in close succession; each is a separate row in the sample table linked by
 | `.sid` | int | Parent station (foreign key) |
 | `sample_type` | chr | Kind of observation (`"fishing"`, `"ctd"`, `"logger"`, …) |
 | `t1` | datetime | Sample start — gear deployment starts |
-| `t2` | datetime | Gear deployment ends (unrecorded for all current gear classes; `NA`) |
+| `t2` | datetime | Gear deployment ends (recorded for mobile gear in `afli`; absent in `fs_afladagbok` and for static gear in both schemas) |
 | `t3` | datetime | Gear retrieval starts |
 | `t4` | datetime | Sample end — gear retrieval ends |
 
@@ -448,11 +448,15 @@ fishing_sample |>
 #### Effort duration
 
 The theoretically correct effort interval is `t3 − t2` for all gear classes:
-deployment-end to retrieval-start. For mobile gear both events are usually
-recorded and the interval is exact. For static gear `t2` (last hook in) is
-rarely recorded; soak time is therefore approximated as `t3 − t1` — the
-interval from first-hook-in to first-hook-hauled — which overestimates true
-soak time by the deployment duration `t2 − t1`.
+deployment-end to retrieval-start. For mobile gear in the `afli` schema, t2 is
+derived from `ibotni` (the recorded gear-on-bottom time) and t3 from t2 +
+logged duration, so the interval is exact. In `fs_afladagbok`, t3 is absent
+for mobile gear (OTB/OTM/DRB); duration is approximated as `t4 − t1` (full
+operation from warp-entry to retrieval end), which overestimates the active
+tow time by the warp-out and warp-in intervals. For static gear, `t2` (last
+hook/net in) is never recorded in either schema; soak time is therefore
+approximated as `t3 − t1` — the interval from first-hook-in to first-hook-hauled
+— which overestimates true soak time by the deployment duration `t2 − t1`.
 
 #### Non-overlap constraints
 
@@ -482,12 +486,24 @@ windows will produce false positives for static gear and should not be used.
 
 #### What is typically recorded
 
-| Label | Mobile gear | Static gear |
-|---|---|---|
-| `t1` | Rarely | Usually |
-| `t2` | Usually | Rarely |
-| `t3` | Usually | Usually |
-| `t4` | Rarely | Usually |
+The table below summarises what is available in practice across the two source
+schemas. Gear code entry errors exist in both systems — a record nominally coded
+as mobile gear may occasionally represent a static operation and vice versa —
+so the timestamp pattern of a record is a useful cross-check on the declared
+gear code.
+
+| Label | Mobile (trawl/dredge) | Jig / handline | Static (net / longline) |
+|---|---|---|---|
+| `t1` | `afli`: absent; `fs_afladagbok`: always present | Rarely | Usually (`afli`); always present (`fs_afladagbok`) |
+| `t2` | `afli`: derived from `ibotni` (gear-on-bottom hhmm); `fs_afladagbok`: absent | Rarely | Never in either schema |
+| `t3` | `afli`: derived (t2 + duration); `fs_afladagbok`: absent for OTB/OTM/DRB, always = t1 for SDN | Rarely | Usually (`afli`); always present (`fs_afladagbok`) |
+| `t4` | `afli`: absent; `fs_afladagbok`: always present | Rarely | Usually (`afli`); always present (`fs_afladagbok`) |
+
+For jigs, the canonical expectation is t2 and t3 (fishing start and end); with
+three distinct timestamps the interpretation is t1, t2, t3. In practice the
+`afli` jig records carry timestamps in only ~3% of rows, so effort is almost
+always derived from the logged duration (`klst`) rather than timestamp
+differences.
 
 ### Other sample types
 

@@ -6,7 +6,7 @@ date: today
 
 ```{r setup}
 #| include: false
-library(arrow)
+library(nanoparquet)
 library(dplyr)
 library(lubridate)
 library(ggplot2)

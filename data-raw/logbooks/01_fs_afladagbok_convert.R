@@ -7,13 +7,13 @@
 library(whack)     # pak::pak("einarhjorleifsson/whack")
 library(geo)
 library(tidyverse)
-library(nanoparquet)
+library(duckdbfs)
 
 SCHEMA <- "fs_afladagbok"
-dictionary   <- read_parquet("data/dictionary.parquet") |> filter(schema == SCHEMA)
-gear_mapping <- read_parquet("data/gear/gear_mapping.parquet") |> filter(version == "new")
+dictionary   <- duckdbfs::open_dataset("data/dictionary.parquet") |> collect() |> filter(schema == SCHEMA)
+gear_mapping <- duckdbfs::open_dataset("data/gear/gear_mapping.parquet") |> collect() |> filter(version == "new")
 harbours <-
-  read_parquet("data/ports/hafnarnumerakerfid.parquet") |>
+  duckdbfs::open_dataset("data/ports/hafnarnumerakerfid.parquet") |> collect() |>
   select(hid_new = hafnarnumer_id, port, hid) |>
   drop_na()
 
@@ -29,7 +29,7 @@ DDM_SOURCES <- c(
 # Built first: `source` (uppruni) is a trip-level column in ws_veidiferd and
 # is needed for coordinate classification in ws_veidi below.
 trip <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_veidiferd.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_veidiferd.parquet") |> collect() |>
   wk_translate(dictionary) |>
   rename(.tid = id) |>
   mutate(n_crew = NA_integer_, schema = SCHEMA) |>
@@ -48,8 +48,10 @@ trip <- trip |>
 # then convert raw integer coordinates to decimal degrees.
 # After this block `source` has: .sid .tid gid t1 t3 t4 lon1 lat1 lon2 lat2
 # z1 z2 n_lost date schema.
+# Raw columns: upphaf_timi→t1, milli_timi→t3, lok_timi→t4.
+# t3 (milli_timi) is absent for OTB/OTM/DRB; for SDN it always equals t1.
 source <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_veidi.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_veidi.parquet") |> collect() |>
   wk_translate(dictionary) |>
   rename(.sid = id) |>
   select(-c(breytt, skraningartimi, snt, veidarfaeri_efni, athugasemd_txt)) |>
@@ -152,31 +154,31 @@ station <-
 
 ## Mobile (ws_dragnot_varpa: OTB / OTM / SDN) ----------------------------------
 aux_mobile <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_dragnot_varpa.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_dragnot_varpa.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear %in% c("OTB", "OTM", "SDN")), by = ".sid")
 
 ## Dredge (ws_plogur: DRB) ----------------------------------------------------
 aux_dredge <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_plogur.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_plogur.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "DRB"), by = ".sid")
 
 ## Static (ws_linanethandf: LLS / GNS / GND / LHM) ----------------------------
 aux_static <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_linanethandf.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_linanethandf.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear %in% c("LLS", "GNS", "GND", "LHM")), by = ".sid")
 
 ## Traps (ws_gildra: FPO) -----------------------------------------------------
 aux_trap <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_gildra.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_gildra.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "FPO"), by = ".sid")
 
 ## Purse seine (ws_hringn: PS) -------------------------------------------------
 aux_seine <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_hringn.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_hringn.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(source_gear |> filter(gear == "PS"), by = ".sid")
 
@@ -259,12 +261,23 @@ gear_caps <- tribble(
 fishing_sample <-
   source |>
   select(.tid, .sid, gid, t1, t3, t4, date, n_lost, schema) |>
-  mutate(t2 = NA_POSIXct_) |>
+  # t2 (deployment ends / gear-on-bottom) has no raw column in ws_veidi;
+  # it is absent for all gear classes in this schema.
+  # For static gear (LLS/GNS/GND/LHM/FPO): t1=upphaf_timi, t3=milli_timi,
+  #   t4=lok_timi.
+  # For mobile gear (OTB/OTM/DRB): t3 (milli_timi) is absent; t1 and t4 only.
+  # For SDN: milli_timi is recorded but equals upphaf_timi (t1) in all rows —
+  #   effectively only t1 and t4 carry distinct information.
+  mutate(t2 = NA_POSIXct_,
+         # SDN (gid=11): milli_timi always equals upphaf_timi — null t3 out
+         # so it does not masquerade as a distinct retrieval-start timestamp.
+         t3 = if_else(gid == 11L & !is.na(t3) & t3 == t1, NA_POSIXct_, t3)) |>
   left_join(gear_mapping |> select(gid, gid_old = map, gear, target2), by = "gid") |>
   # Duration by gear class:
-  #   t3 (milli_timi) is absent for OTB/OTM/DRB, so duration = t4 − t1
-  #   for all time-based gears (full operation from warp-entry / gear-set to
-  #   hauling end / retrieval end). SDN / PS effort is per setting, no duration.
+  #   Mobile (OTB/OTM/DRB): t3 absent; duration = t4 − t1 (full operation —
+  #     warp-out to retrieval end — overestimates active tow by warp intervals).
+  #   Static (LLS/GNS/GND/LHM/FPO): duration = t4 − t1.
+  #   SDN / PS: effort is per setting; no time-based duration.
   mutate(duration_m = case_when(
     gear %in% c("OTB", "OTM", "DRB", "LLS", "GNS", "GND", "LHM", "FPO") ~
       as.numeric(difftime(t4, t1, units = "mins")),
@@ -309,7 +322,7 @@ fishing_sample <-
 
 # Catch -----------------------------------------------------------------------
 catch <-
-  read_parquet("data-dump/logbooks/fs_afladagbok/ws_afli.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/fs_afladagbok/ws_afli.parquet") |> collect() |>
   wk_translate(dictionary) |>
   select(.sid, sid, catch = magn) |>  # CHANGE DICTIONARY
   group_by(.sid, sid) |>
@@ -318,11 +331,11 @@ catch <-
   arrange(.sid, sid)
 
 # Export -----------------------------------------------------------------------
-trip           |> write_parquet("data-raw/logbooks/fs_afladagbok/trip.parquet")
-station        |> write_parquet("data-raw/logbooks/fs_afladagbok/station.parquet")
-fishing_sample |> write_parquet("data-raw/logbooks/fs_afladagbok/fishing_sample.parquet")
+trip           |> duckdbfs::write_dataset("data-raw/logbooks/fs_afladagbok/trip.parquet")
+station        |> duckdbfs::write_dataset("data-raw/logbooks/fs_afladagbok/station.parquet")
+fishing_sample |> duckdbfs::write_dataset("data-raw/logbooks/fs_afladagbok/fishing_sample.parquet")
 
-catch          |> write_parquet("data-raw/logbooks/fs_afladagbok/catch.parquet")
+catch          |> duckdbfs::write_dataset("data-raw/logbooks/fs_afladagbok/catch.parquet")
 
 
 # QC scratch (if FALSE) -------------------------------------------------------

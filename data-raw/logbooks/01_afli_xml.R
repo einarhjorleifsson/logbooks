@@ -19,7 +19,7 @@
 #   vid   — vessel id (skip_nr)
 #   visir — station id (NA for root-level GPS_DATA)
 
-library(arrow)
+library(nanoparquet)
 library(duckdb)
 library(dplyr)
 library(purrr)

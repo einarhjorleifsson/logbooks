@@ -262,7 +262,7 @@ Full column tables, effort units, and merge details in `AGENTS_output_schema.md`
 
 - `trip.parquet` — one row per voyage (`.tid`, `vid`, `T1`, `hid1`, `T2`, `hid2`, `n_crew`, `source`, `schema`)
 - `station.parquet` — spatial/temporal envelope (`.sid`, `.tid`, `date`, `lon1/lat1/lon2/lat2`, `z1/z2`, `schema`)
-- `fishing_sample.parquet` — gear and effort, 1:1 with station (`.sid`, `.tid`, `gid`, `gid_old`, `gear`, `target2`, `t1`–`t4`, `duration_m`, effort columns, `g_mesh/g_width/g_length/g_height`, `back_entry`, `schema`)
+- `fishing_sample.parquet` — gear and effort, 1:1 with station (`.sid`, `.tid`, `gid`, `gid_old`, `gear`, `target2`, `t1`–`t4`, `duration_m`, effort columns, `g_mesh/g_width/g_length/g_height`, `back_entry`, `schema`). t2 population by schema/gear: `afli` mobile — derived from `ibotni` (gear-on-bottom hhmm); `fs_afladagbok` — t2 always NA (no raw column); static gear in both schemas — t2 always NA. `fs_afladagbok` SDN: t3 set to NA (milli_timi = upphaf_timi in 100% of records). `fs_afladagbok` mobile (OTB/OTM/DRB): t3 absent; `duration_m = t4 − t1` (overestimates active tow).
 - `catch.parquet` — one row per species per station (`.sid`, `sid`, `catch`)
 
 Effort: `effort = effort_count × effort_duration`. Units: `"gear-minutes"`, `"hook-days"`, `"net-days"`, `"jig-hours"`, `"trap-hours"`, `"setting"`.
@@ -295,8 +295,9 @@ Directory layout:
 ## Coding conventions
 
 - **dplyr-first**: prefer dplyr pipelines; DuckDB/SQL only for performance.
-- **Parquet for storage**: `nanoparquet::write_parquet()` or `arrow::write_parquet()` for data without POSIXct columns. For data frames containing POSIXct timestamps, use `duckdbfs::write_dataset()` — both `arrow` and `nanoparquet` write POSIXct as `TIMESTAMP WITH TIME ZONE`, which DuckDB cannot subtract directly.
+- **Parquet for storage**: use `duckdbfs::open_dataset("path.parquet") |> collect()` for reading and `duckdbfs::write_dataset(df, "path.parquet")` for writing throughout pipeline scripts. `duckdbfs` writes PLAIN `TIMESTAMP` (not `TIMESTAMPTZ`) for POSIXct columns, which DuckDB can subtract directly. Never `library(arrow)` in pipeline scripts — arrow writes `TIMESTAMP WITH TIME ZONE`, which DuckDB cannot subtract. `nanoparquet::read_parquet()` / `nanoparquet::write_parquet()` are acceptable for ad-hoc / exploratory scripts where DuckDB interop is not needed.
 - **duckdbfs for large files**: `duckdbfs::open_dataset()` for files > ~100 MB; `collect()` only what you need.
+- **`purrr::map()` must be qualified**: `duckdbfs` loads the `maps` package as a dependency, which masks `purrr::map()`. Always write `purrr::map(...)` (never bare `map(...)`) in any script that also loads `duckdbfs`. `maps::map()` throws "database type not supported" when called with non-map arguments, making the root cause very hard to diagnose.
 - **Base R pipe** `|>`, not `%>%`.
 - **Comments**: non-obvious reasons only; script head should state input/output files.
 - **Section headers**: single-dash style only:
@@ -359,6 +360,7 @@ Directory layout:
 ## Outstanding Work
 
 - [ ] **Lumpfish logbook QA** — gid=3/4 match rates 26%/50%; needs investigation before catch reconciliation.
+- [ ] **Gear code cross-check via landings** — post-2007-09-01 logbook records can be cross-checked against the gear code on the matched landing (`lid_map.parquet`) to flag cross-class gear code errors (e.g., a static gear coded as mobile). Timestamp pattern (which of t1–t4 are populated) provides a secondary signal. Quantify cross-class mismatch rate before using it to revise timestamp assignment.
 - [ ] **Finalise `01_afli_siritar.R`** — run at full scale; write `sensor_GPS/` (directory, via `duckdbfs::write_dataset`); notify `../fishydata`.
 - [ ] **Characterise AIS coverage gaps** — quantify NA lon/lat from `rule = 2` extrapolation.
 - [ ] **Fix gid 9 coordinate encoding** in `01_fs_afladagbok_convert.R` — classify Flotvarpa rows by `uppruni`.

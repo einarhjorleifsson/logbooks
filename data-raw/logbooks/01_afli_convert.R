@@ -6,13 +6,13 @@
 library(whack) # pak::pak("einarhjorleifsson/whack")
 library(geo)
 library(tidyverse)
-library(nanoparquet)
+library(duckdbfs)
 
 SCHEMA <- "afli"
-dictionary   <- read_parquet("data/dictionary.parquet") |> filter(schema == SCHEMA)
-gear_mapping <- read_parquet("data/gear/gear_mapping.parquet") |> filter(version == "old")
+dictionary   <- duckdbfs::open_dataset("data/dictionary.parquet") |> collect() |> filter(schema == SCHEMA)
+gear_mapping <- duckdbfs::open_dataset("data/gear/gear_mapping.parquet") |> collect() |> filter(version == "old")
 harbours <-
-  read_parquet("data/ports/hafnarnumerakerfid.parquet") |>
+  duckdbfs::open_dataset("data/ports/hafnarnumerakerfid.parquet") |> collect() |>
   select(hid, port) |>
   drop_na()
 # eytt flag: records officially deleted in Oracle (eytt=1 in rafr_stofn).
@@ -20,7 +20,7 @@ harbours <-
 # eytt_deleted = TRUE  → deleted in Oracle; treat with caution / exclude.
 # eytt_deleted = FALSE → active in Oracle (rafr_ era, 2003–2020).
 # eytt_deleted = NA    → not in rafr_ (paper era, or 2020–2022 direct-load).
-eytt_ref <- read_parquet("data-dump/logbooks/afli/rafr_stofn.parquet") |>
+eytt_ref <- duckdbfs::open_dataset("data-dump/logbooks/afli/rafr_stofn.parquet") |> collect() |>
   select(visir, eytt) |>
   mutate(eytt_deleted = eytt == 1L) |>
   select(visir, eytt_deleted)
@@ -29,7 +29,7 @@ eytt_ref <- read_parquet("data-dump/logbooks/afli/rafr_stofn.parquet") |>
 # No explicit trip table in this schema; .tid derived as min(.sid) per
 # (vid, T2, hid2). T1 is the minimum fishing date within the derived trip.
 source <-
-  read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/stofn.parquet") |> collect() |>
   wk_translate(dictionary) |>
   filter(!is.na(date)) |>                        # 40 records have NA date
   # Remove ~41k monthly aggregate records (nephrops, shrimp, d-seine); these
@@ -80,14 +80,14 @@ station <-
 
 ## Mobile (toga: OTB / OTM / DRB / SDN) ---------------------------------------
 aux_mobile <-
-  read_parquet("data-dump/logbooks/afli/toga.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/toga.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear %in% c("DRB", "OTB", "OTM", "SDN")),
              by = ".sid")
 
 ## Static (lineha: LLS / GNS / GND / LHM) -------------------------------------
 aux_static <-
-  read_parquet("data-dump/logbooks/afli/lineha.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/lineha.parquet") |> collect() |>
   rename(.sid = visir) |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear %in% c("LLS", "GNS", "GND", "LHM")),
@@ -95,14 +95,14 @@ aux_static <-
 
 ## Trap (gildra: FPO) ----------------------------------------------------------
 aux_trap <-
-  read_parquet("data-dump/logbooks/afli/gildra.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/gildra.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear == "FPO"), by = ".sid") |>
   mutate(duration_m = duration_h * 60)
 
 ## Seine / ring net (hringn: PS) -----------------------------------------------
 aux_seine <-
-  read_parquet("data-dump/logbooks/afli/hringn.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/hringn.parquet") |> collect() |>
   wk_translate(dictionary) |>
   inner_join(stofn_gear |> filter(gear == "PS"), by = ".sid")
 
@@ -110,9 +110,13 @@ aux_seine <-
 
 ## Timing ----------------------------------------------------------------------
 # Event timestamps and soak/tow duration from each aux table.
-# Grammar (t1–t4): static gear t1=deployment start, t3=retrieval start,
-# t4=retrieval end; t2 (deployment end) is unrecorded (NA) for all gears.
-# Mobile gear: t2=tow start (derived from hhmm), t3=tow end (t2+duration_m).
+# Grammar (t1–t4):
+#   Mobile (OTB/OTM/DRB/SDN): t2 = gear-on-bottom (derived from ibotni/hhmm);
+#     t3 = tow end (t2 + duration_m); t1 and t4 not recorded in toga.
+#   Static (LLS/GNS/GND): t1 = deployment start (logn_hefst); t3 = retrieval
+#     start (drattur_hefst); t4 = retrieval end (drattur_lykur); t2 not recorded.
+#   Jig/handline (LHM): timestamps in lineha in ~3% of rows only; duration from
+#     klst (hours) or naetur (days) in the remainder.
 timing <-
   bind_rows(
     aux_mobile |> select(.sid, hhmm, duration_m),
@@ -250,9 +254,9 @@ fishing_sample <-
 
 
 ## Timestamps ------------------------------------------------------------------
-# Mobile: derive t2 (tow start) from hhmm when absent; derive t3 (tow end)
-# from t2 + duration_m. t2 = deployment end is unrecorded for all gears (NA).
-# Static: t3/t4 come from data; t2 is never recorded (remains NA).
+# Mobile: derive t2 (gear-on-bottom) from ibotni/hhmm; derive t3 (tow end)
+# from t2 + duration_m. t2 is absent for static gear (nets, lines, jigs).
+# Static: t1/t3/t4 come from lineha; t2 is never recorded for static gears.
 fishing_sample <- fishing_sample |>
   mutate(t2 = NA_POSIXct_) |>
   mutate(.t2_source = if_else(!is.na(t2), "data", "derived"),
@@ -315,7 +319,7 @@ sensor <-
 
 # Catch -----------------------------------------------------------------------
 catch <-
-  read_parquet("data-dump/logbooks/afli/afli.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/afli.parquet") |> collect() |>
   wk_translate(dictionary, "messy", "clean") |>
   select(.sid, sid, catch) |>
   group_by(.sid, sid) |>
@@ -329,7 +333,7 @@ catch <-
 # date is mid-month (15th); no coordinates available; duration_m is total
 # aggregated tow time for the period (not a single-haul value).
 agg_stofn <-
-  read_parquet("data-dump/logbooks/afli/stofn.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/stofn.parquet") |> collect() |>
   wk_translate(dictionary) |>
   filter(!is.na(date)) |>
   filter(
@@ -347,12 +351,12 @@ agg_stofn <-
   select(.sid, vid, gid, date, sq, ssq, agg_type)
 
 agg_catch <-
-  read_parquet("data-dump/logbooks/afli/afli.parquet") |>
+  duckdbfs::open_dataset("data-dump/logbooks/afli/afli.parquet") |> collect() |>
   wk_translate(dictionary, "messy", "clean") |>
   select(.sid, sid, catch) |>
   inner_join(agg_stofn, by = ".sid") |>
   left_join(
-    read_parquet("data-dump/logbooks/afli/toga.parquet") |>
+    duckdbfs::open_dataset("data-dump/logbooks/afli/toga.parquet") |> collect() |>
       wk_translate(dictionary) |>
       select(.sid, duration_m),
     by = ".sid"
@@ -362,12 +366,12 @@ agg_catch <-
 
 
 # Export -----------------------------------------------------------------------
-trip           |> write_parquet("data-raw/logbooks/afli/trip.parquet")
-station        |> write_parquet("data-raw/logbooks/afli/station.parquet")
-fishing_sample |> write_parquet("data-raw/logbooks/afli/fishing_sample.parquet")
-sensor         |> write_parquet("data-raw/logbooks/afli/sensor.parquet")
-catch          |> write_parquet("data-raw/logbooks/afli/catch.parquet")
-agg_catch      |> write_parquet("data-raw/logbooks/afli/aggregate.parquet")
+trip           |> duckdbfs::write_dataset("data-raw/logbooks/afli/trip.parquet")
+station        |> duckdbfs::write_dataset("data-raw/logbooks/afli/station.parquet")
+fishing_sample |> duckdbfs::write_dataset("data-raw/logbooks/afli/fishing_sample.parquet")
+sensor         |> duckdbfs::write_dataset("data-raw/logbooks/afli/sensor.parquet")
+catch          |> duckdbfs::write_dataset("data-raw/logbooks/afli/catch.parquet")
+agg_catch      |> duckdbfs::write_dataset("data-raw/logbooks/afli/aggregate.parquet")
 
 
 # QC scratch (if FALSE) -------------------------------------------------------
@@ -408,7 +412,7 @@ if (FALSE) {
 
   ## Cross-check against landings ----------------------------------------------
   lods_londun <-
-    read_parquet("../landings/data-raw/data-dump/kvoti/lods_londun.parquet") |>
+    duckdbfs::open_dataset("../landings/data-raw/data-dump/kvoti/lods_londun.parquet") |> collect() |>
     select(.lid = komunr, vid = skip_nr, D2 = l_dags, hid2 = hofn,
            comment = aths, stada) |>
     mutate(D2 = as_date(D2))
